@@ -6,7 +6,7 @@ mod udp;
 
 use clap::Parser;
 use memmap2::Mmap;
-use std::{collections::BinaryHeap, fs::File, path::Path};
+use std::{cell::OnceCell, collections::BinaryHeap, fs::File, io::BufWriter, path::Path};
 
 use self::{
     ethernet::EthernetPacket,
@@ -26,6 +26,13 @@ const QUOTE_PACKET_SIZE: usize = 215;
 const ETHER_TYPE_IPV4: u16 = 0x0800;
 const ETHER_TYPE_IPV6: u16 = 0x86DD;
 const PROTOCOL_NUMBER_UDP: u8 = 0x11;
+
+const HOUR_MICROS: i64 = 3_600_000_000;
+const MIN_MICROS: i64 = 60_000_000;
+const SEC_MICROS: i64 = 1_000_000;
+const CENT_MICROS: i64 = 10_000;
+
+const TIMEZONE_OFFSET: i64 = 9 * HOUR_MICROS; // KRX is GMT +9
 
 #[derive(Parser)]
 struct Args {
@@ -56,7 +63,7 @@ where
 
 fn build_quote_iterator<'a>(
     pcap_iterator: PcapIterator<'a>,
-    base_timestamp: &mut Option<i64>,
+    base_timestamp: &OnceCell<i64>,
 ) -> impl Iterator<Item = QuotePacket<'a>> {
     pcap_iterator.enumerate().filter_map(|(seq_num, p)| {
         let PcapPacket {
@@ -89,22 +96,24 @@ fn main() -> std::io::Result<()> {
 
     let mmap = open_mmaped_file(args.input)?;
 
-    // Timestamp of midnight + drift between PCAP and the exchange
-    let mut base_timestamp: Option<i64> = None;
+    // Timestamp of GMT +9 midnight. Using a `OnceCell` because this needs to be simultaneously used by the
+    // iterator and the printing logic
+    let base_timestamp: OnceCell<i64> = OnceCell::new();
 
-    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap), &mut base_timestamp);
+    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap), &base_timestamp);
+
+    let mut writer = BufWriter::new(std::io::stdout().lock());
 
     if args.reorder {
         let mut heap: BinaryHeap<QuotePacket<'_>> = BinaryHeap::new();
 
         for quote in quote_iterator {
-            const THREE_SECONDS: i64 = 3_000_000; // 3 million microseconds
-
-            if let Some(oldest) = heap.peek()
-                && quote.pkt_time - oldest.accept_time >= THREE_SECONDS
-            {
-                let quote = heap.pop().unwrap();
-                print_quote(&quote);
+            if let Some(earliest) = heap.peek() {
+                // If the 3 second delay has passed
+                if quote.pkt_time_utc - earliest.accept_time_utc >= 3 * SEC_MICROS {
+                    let earliest = heap.pop().unwrap();
+                    earliest.write_line(&mut writer, *base_timestamp.get().unwrap())?;
+                }
             }
 
             heap.push(quote);
@@ -112,35 +121,13 @@ fn main() -> std::io::Result<()> {
 
         // Print the remaining quotes
         while let Some(quote) = heap.pop() {
-            print_quote(&quote);
+            quote.write_line(&mut writer, *base_timestamp.get().unwrap())?;
         }
     } else {
         for quote in quote_iterator {
-            print_quote(&quote);
+            quote.write_line(&mut writer, *base_timestamp.get().unwrap())?;
         }
     }
 
     Ok(())
-}
-
-#[rustfmt::skip]
-fn print_quote(quote: &QuotePacket<'_>) {
-    println!(
-        concat!(
-            "{} {} {} ",
-            "{:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} ",
-            "{:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5}"
-        ),
-        quote.pkt_time(), quote.accept_time_str(), quote.issue_code(),
-        quote.bid_5_quantity(), quote.bid_5_price(),
-        quote.bid_4_quantity(), quote.bid_4_price(),
-        quote.bid_3_quantity(), quote.bid_3_price(),
-        quote.bid_2_quantity(), quote.bid_2_price(),
-        quote.bid_1_quantity(), quote.bid_1_price(),
-        quote.ask_1_quantity(), quote.ask_1_price(),
-        quote.ask_2_quantity(), quote.ask_2_price(),
-        quote.ask_3_quantity(), quote.ask_3_price(),
-        quote.ask_4_quantity(), quote.ask_4_price(),
-        quote.ask_5_quantity(), quote.ask_5_price(),
-    );
 }
