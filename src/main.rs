@@ -1,6 +1,8 @@
+mod pcap;
+
 use clap::Parser;
 use memmap2::Mmap;
-use std::{fs::File, iter::Iterator};
+use std::{collections::BinaryHeap, fs::File, iter::Iterator};
 
 #[derive(Parser)]
 struct Args {
@@ -23,9 +25,31 @@ const ETHER_TYPE_IPV4: u16 = 0x0800;
 const ETHER_TYPE_IPV6: u16 = 0x86DD;
 const PROTOCOL_NUMBER_UDP: u8 = 0x11;
 
+#[derive(PartialEq, Eq)]
 struct Quote<'a> {
+    seq_num: u64, // Used for "stable" sorting
     pkt_time: u64,
+    // TODO: add accept time as a u64 for faster comparison
     data: &'a [u8; QUOTE_PACKET_SIZE],
+}
+
+impl<'a> PartialOrd for Quote<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Ord for Quote<'a> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse the comparison for min-heap
+        match other.accept_time().cmp(self.accept_time()) {
+            std::cmp::Ordering::Equal => {
+                // Tie-break with the `seq_num` to prevent reordering by the `BinaryHeap`
+                other.seq_num.cmp(&self.seq_num)
+            }
+            order => order,
+        }
+    }
 }
 
 impl<'a> Quote<'a> {
@@ -103,6 +127,7 @@ generate_getters! {
 struct QuoteIterator<'a> {
     data: &'a [u8],
     offset: usize,
+    counter: u64,
 }
 
 impl<'a> QuoteIterator<'a> {
@@ -119,6 +144,7 @@ impl<'a> QuoteIterator<'a> {
         QuoteIterator {
             data,
             offset: GLOBAL_HEADER_SIZE, // Skip global header
+            counter: 0,
         }
     }
 }
@@ -284,8 +310,13 @@ impl<'a> Iterator for QuoteIterator<'a> {
             // Check if a quote packet
             let result = if payload.starts_with(b"B6034") {
                 payload.try_into().ok().map(|data| {
+                    let seq_num = self.counter;
+                    self.counter += 1;
+
                     let total_usecs: u64 = (ts_sec as u64 * 1_000_000) + (ts_usec as u64);
+
                     Quote {
+                        seq_num,
                         pkt_time: total_usecs,
                         data,
                     }
@@ -336,13 +367,32 @@ fn main() -> std::io::Result<()> {
 
     let quote_iterator = QuoteIterator::new(&mmap);
 
-    // 1. Extract the Quote Accept Time (last 8 bytes of message)
-    // 2. Push to BinaryHeap for reordering
-
     // assert_eq!(16004, quote_iterator.count());
 
-    for quote in quote_iterator {
-        print_quote(&quote);
+    if args.reorder {
+        let mut heap: BinaryHeap<Quote<'_>> = BinaryHeap::new();
+
+        for quote in quote_iterator {
+            const THREE_SECONDS: u64 = 3_000_000; // 3 million microseconds
+
+            if let Some(oldest) = heap.peek()
+                && quote.pkt_time - oldest.pkt_time >= THREE_SECONDS
+            {
+                let quote = heap.pop().unwrap();
+                print_quote(&quote);
+            }
+
+            heap.push(quote);
+        }
+
+        // Print the remaining quotes
+        while let Some(quote) = heap.pop() {
+            print_quote(&quote);
+        }
+    } else {
+        for quote in quote_iterator {
+            print_quote(&quote);
+        }
     }
 
     Ok(())
