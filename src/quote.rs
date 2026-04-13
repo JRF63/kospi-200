@@ -1,10 +1,11 @@
 use crate::QUOTE_PACKET_SIZE;
+use chrono::{DateTime, Timelike};
 
 #[derive(PartialEq, Eq)]
 pub struct QuotePacket<'a> {
     pub seq_num: usize, // Used for "stable" sorting
-    pub pkt_time: u64,
-    // TODO: add accept time as a u64 for faster comparison
+    pub pkt_time: i64,
+    pub accept_time: i64,
     pub data: &'a [u8; QUOTE_PACKET_SIZE],
 }
 
@@ -17,7 +18,7 @@ impl<'a> PartialOrd for QuotePacket<'a> {
 impl<'a> Ord for QuotePacket<'a> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse the comparison for min-heap
-        match other.accept_time().cmp(self.accept_time()) {
+        match other.accept_time.cmp(&self.accept_time) {
             std::cmp::Ordering::Equal => {
                 // Tie-break with the `seq_num` to prevent reordering by the `BinaryHeap`
                 other.seq_num.cmp(&self.seq_num)
@@ -27,16 +28,75 @@ impl<'a> Ord for QuotePacket<'a> {
     }
 }
 
+fn calculate_accept_time_micros(hour: u64, min: u64, sec: u64, cent: u64) -> u64 {
+    const HOUR_MICROS: u64 = 3_600_000_000;
+    const MIN_MICROS: u64 = 60_000_000;
+    const SEC_MICROS: u64 = 1_000_000;
+    const CENT_MICROS: u64 = 10_000;
+
+    hour * HOUR_MICROS + min * MIN_MICROS + sec * SEC_MICROS + cent * CENT_MICROS
+}
+
+fn parse_accept_time(data: &[u8; QUOTE_PACKET_SIZE]) -> [u64; 4] {
+    // SAFETY: 206..214 is exactly 8 bytes
+    let bytes: [u8; 8] = unsafe { *data[206..214].as_array().unwrap_unchecked() };
+
+    let val = u64::from_le_bytes(bytes);
+
+    // Subtract ASCII '0' from all 8 bytes simultaneously
+    let digits = val - 0x3030303030303030;
+
+    let hour = (digits & 0xFF) * 10 + ((digits >> 8) & 0xFF);
+    let min = ((digits >> 16) & 0xFF) * 10 + ((digits >> 24) & 0xFF);
+    let sec = ((digits >> 32) & 0xFF) * 10 + ((digits >> 40) & 0xFF);
+    let cent = ((digits >> 48) & 0xFF) * 10 + ((digits >> 56) & 0xFF);
+
+    [hour, min, sec, cent]
+}
+
 impl<'a> QuotePacket<'a> {
-    pub fn new(seq_num: usize, ts_sec: u32, ts_usec: u32, data: &'a [u8]) -> Option<Self> {
+    pub fn new(
+        seq_num: usize,
+        pkt_time: i64,
+        data: &'a [u8],
+        base_timestamp: &mut Option<i64>,
+    ) -> Option<Self> {
         if data.starts_with(b"B6034") {
-            data.try_into().ok().map(|data| {
-                let total_usecs: u64 = (ts_sec as u64 * 1_000_000) + (ts_usec as u64);
-                Self {
-                    seq_num,
-                    pkt_time: total_usecs,
-                    data,
+            let data = data.as_array::<QUOTE_PACKET_SIZE>()?;
+
+            let [hour, min, sec, cent] = parse_accept_time(data);
+            let micros_after_midnight = calculate_accept_time_micros(hour, min, sec, cent) as i64;
+
+            // Avoid using `chrono::DateTime` as much as possible
+            let accept_time = match base_timestamp {
+                Some(delta) => {
+                    // The fast path
+                    *delta + micros_after_midnight
                 }
+                None => {
+                    let pkt_time_dt = DateTime::from_timestamp_micros(pkt_time)?;
+
+                    // This part is relatively slow
+                    let accept_time_dt = pkt_time_dt
+                        .with_hour(hour as u32)?
+                        .with_minute(min as u32)?
+                        .with_second(sec as u32)?
+                        .with_nanosecond(cent as u32 * 10_000_000)?;
+
+                    let accept_time = accept_time_dt.timestamp_micros();
+
+                    // Pre-calculate a timestamp offset on the first packet so we only have to do
+                    // the expensive DateTime calculation once
+                    *base_timestamp = Some(accept_time - micros_after_midnight);
+                    accept_time
+                }
+            };
+
+            Some(Self {
+                seq_num,
+                pkt_time,
+                accept_time,
+                data,
             })
         } else {
             None
@@ -57,11 +117,11 @@ impl<'a> QuotePacket<'a> {
         if trimmed.is_empty() { "0" } else { trimmed }
     }
 
-    pub fn pkt_time(&'a self) -> u64 {
+    pub fn pkt_time(&'a self) -> i64 {
         self.pkt_time
     }
 
-    pub fn accept_time(&'a self) -> &'a str {
+    pub fn accept_time_str(&'a self) -> &'a str {
         self.parse_as_ascii_string::<206, 214>()
     }
 
@@ -116,40 +176,12 @@ generate_getters! {
 
 #[test]
 fn test_quote_parsing() {
-    use crate::{
-        PROTOCOL_NUMBER_UDP,
-        ethernet::EthernetPacket,
-        ip::IpPacket,
-        pcap::{PcapIterator, PcapPacket},
-        udp::UdpPacket,
-    };
+    use crate::{build_quote_iterator, pcap::PcapIterator};
 
     let mmap = crate::open_mmaped_file("mdf-kospi200.20110216-0.pcap").unwrap();
-    let iterator = PcapIterator::new(&mmap);
 
-    assert_eq!(
-        iterator
-            .enumerate()
-            .filter_map(|(seq_num, p)| {
-                let PcapPacket {
-                    ts_sec,
-                    ts_usec,
-                    data,
-                } = p;
-                let EthernetPacket { ether_type, data } = EthernetPacket::new(data)?;
-                let IpPacket { protocol, data } = IpPacket::new(ether_type, data)?;
+    let mut base_timestamp: Option<i64> = None;
+    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap), &mut base_timestamp);
 
-                if protocol == PROTOCOL_NUMBER_UDP {
-                    let UdpPacket { dst_port, data } = UdpPacket::new(data)?;
-                    match dst_port {
-                        15515..=15516 => QuotePacket::new(seq_num, ts_sec, ts_usec, data),
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            })
-            .count(),
-        16004
-    );
+    assert_eq!(quote_iterator.count(), 16004);
 }

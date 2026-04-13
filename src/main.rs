@@ -40,11 +40,8 @@ struct Args {
 // Helper function for getting a fixed sized array from a slice.
 // This is used for converting to a u16/u32/u64 (minding the endianness).
 fn convert_with_offset<const N: usize>(data: &[u8], offset: usize) -> Option<[u8; N]> {
-    let bytes = data.get(offset..(offset + N))?;
-    debug_assert_eq!(bytes.len(), N);
-
-    // SAFETY: `bytes` is exactly `N` bytes long
-    Some(unsafe { bytes.try_into().unwrap_unchecked() })
+    let bytes = data.get(offset..)?;
+    bytes.first_chunk::<N>().copied()
 }
 
 fn open_mmaped_file<P>(path: P) -> std::io::Result<Mmap>
@@ -57,14 +54,11 @@ where
     unsafe { Mmap::map(&file) }
 }
 
-fn main() -> std::io::Result<()> {
-    let args = Args::parse();
-
-    let mmap = open_mmaped_file(args.input)?;
-
-    let pcap_iterator = PcapIterator::new(&mmap);
-
-    let quote_iterator = pcap_iterator.enumerate().filter_map(|(seq_num, p)| {
+fn build_quote_iterator<'a>(
+    pcap_iterator: PcapIterator<'a>,
+    base_timestamp: &mut Option<i64>,
+) -> impl Iterator<Item = QuotePacket<'a>> {
+    pcap_iterator.enumerate().filter_map(|(seq_num, p)| {
         let PcapPacket {
             ts_sec,
             ts_usec,
@@ -73,25 +67,41 @@ fn main() -> std::io::Result<()> {
         let EthernetPacket { ether_type, data } = EthernetPacket::new(data)?;
         let IpPacket { protocol, data } = IpPacket::new(ether_type, data)?;
 
+        // Only accept UDP packets
         if protocol == PROTOCOL_NUMBER_UDP {
             let UdpPacket { dst_port, data } = UdpPacket::new(data)?;
+
             match dst_port {
-                15515..=15516 => QuotePacket::new(seq_num, ts_sec, ts_usec, data),
-                _ => None,
+                15515..=15516 => {
+                    let pkt_time = (ts_sec as i64 * 1_000_000) + (ts_usec as i64);
+                    QuotePacket::new(seq_num, pkt_time, data, base_timestamp)
+                }
+                _ => None, // Reject packets not on ports 15515 and 15516
             }
         } else {
             None
         }
-    });
+    })
+}
+
+fn main() -> std::io::Result<()> {
+    let args = Args::parse();
+
+    let mmap = open_mmaped_file(args.input)?;
+
+    // Timestamp of midnight + drift between PCAP and the exchange
+    let mut base_timestamp: Option<i64> = None;
+
+    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap), &mut base_timestamp);
 
     if args.reorder {
         let mut heap: BinaryHeap<QuotePacket<'_>> = BinaryHeap::new();
 
         for quote in quote_iterator {
-            const THREE_SECONDS: u64 = 3_000_000; // 3 million microseconds
+            const THREE_SECONDS: i64 = 3_000_000; // 3 million microseconds
 
             if let Some(oldest) = heap.peek()
-                && quote.pkt_time - oldest.pkt_time >= THREE_SECONDS
+                && quote.pkt_time - oldest.accept_time >= THREE_SECONDS
             {
                 let quote = heap.pop().unwrap();
                 print_quote(&quote);
@@ -121,7 +131,7 @@ fn print_quote(quote: &QuotePacket<'_>) {
             "{:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} ",
             "{:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5} {:>7}@{:<5}"
         ),
-        quote.pkt_time(), quote.accept_time(), quote.issue_code(),
+        quote.pkt_time(), quote.accept_time_str(), quote.issue_code(),
         quote.bid_5_quantity(), quote.bid_5_price(),
         quote.bid_4_quantity(), quote.bid_4_price(),
         quote.bid_3_quantity(), quote.bid_3_price(),

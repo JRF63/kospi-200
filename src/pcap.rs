@@ -15,7 +15,7 @@ impl<'a> PcapIterator<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         // TODO: Return a Result/Option instead of using asserts
 
-        // pcap data should be little endian and timestamp is in microseconds
+        // PCAP data should be little endian and timestamp is in microseconds
         assert_eq!(
             u32::from_le_bytes(data[0..4].try_into().unwrap()),
             0xa1b2c3d4
@@ -45,12 +45,8 @@ impl<'a> Iterator for PcapIterator<'a> {
         // | 12..16  | 4      | orig_len | Original length of packet on the wire    |
         // +---------+--------+----------+------------------------------------------+
         let pkt_header: &[u8; PACKET_HEADER_SIZE] = {
-            let header_bytes: &[u8] = self
-                .data
-                .get(self.offset..(self.offset + PACKET_HEADER_SIZE))?; // Stops the iterator if slicing fails
-
-            // SAFETY: The byte slice is exactly `PACKET_HEADER_SIZE` long
-            unsafe { header_bytes.try_into().unwrap_unchecked() }
+            let header_bytes: &[u8] = self.data.get(self.offset..)?;
+            header_bytes.first_chunk::<_>()?
         };
 
         // The following `unwrap`s should be optimized out since `pkt_header` is a `&[u8; 16]`
@@ -64,7 +60,7 @@ impl<'a> Iterator for PcapIterator<'a> {
             self.data.get(start..end)? // Stops the iterator if not enough data
         };
 
-        // Advance to the next packet
+        // Advance to the next PCAP packet
         self.offset += PACKET_HEADER_SIZE + cap_len;
 
         Some(PcapPacket {
