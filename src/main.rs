@@ -2,17 +2,19 @@ mod ethernet;
 mod ip;
 mod pcap;
 mod quote;
+mod time;
 mod udp;
 
 use clap::Parser;
 use memmap2::Mmap;
-use std::{cell::OnceCell, collections::BinaryHeap, fs::File, io::BufWriter, path::Path};
+use std::{collections::BinaryHeap, fs::File, io::BufWriter, path::Path};
 
 use self::{
     ethernet::EthernetPacket,
     ip::IpPacket,
     pcap::{PcapIterator, PcapPacket},
     quote::QuotePacket,
+    time::Timestamp,
     udp::UdpPacket,
 };
 
@@ -26,13 +28,6 @@ const QUOTE_PACKET_SIZE: usize = 215;
 const ETHER_TYPE_IPV4: u16 = 0x0800;
 const ETHER_TYPE_IPV6: u16 = 0x86DD;
 const PROTOCOL_NUMBER_UDP: u8 = 0x11;
-
-const HOUR_MICROS: i64 = 3_600_000_000;
-const MIN_MICROS: i64 = 60_000_000;
-const SEC_MICROS: i64 = 1_000_000;
-const CENT_MICROS: i64 = 10_000;
-
-const TIMEZONE_OFFSET: i64 = 9 * HOUR_MICROS; // KRX is GMT +9
 
 const APPROX_PACKETS_PER_SEC: usize = 1000; // Assume 1000 packets per second
 const INITIAL_HEAP_CAPACITY: usize = 3 * APPROX_PACKETS_PER_SEC; // 3 second buffer
@@ -66,7 +61,6 @@ where
 
 fn build_quote_iterator<'a>(
     pcap_iterator: PcapIterator<'a>,
-    base_timestamp: &OnceCell<i64>,
 ) -> impl Iterator<Item = QuotePacket<'a>> {
     pcap_iterator.enumerate().filter_map(|(seq_num, p)| {
         let PcapPacket { pkt_time, data } = p;
@@ -78,7 +72,7 @@ fn build_quote_iterator<'a>(
             let UdpPacket { dst_port, data } = UdpPacket::new(data)?;
 
             match dst_port {
-                15515..=15516 => QuotePacket::new(seq_num, pkt_time, data, base_timestamp),
+                15515..=15516 => QuotePacket::new(seq_num, pkt_time, data),
                 _ => None, // Reject packets not on ports 15515 and 15516
             }
         } else {
@@ -92,11 +86,7 @@ fn main() -> std::io::Result<()> {
 
     let mmap = open_mmaped_file(args.input)?;
 
-    // Timestamp of GMT +9 midnight. Using a `OnceCell` because this needs to be simultaneously used
-    // by the iterator and the printing logic.
-    let base_timestamp: OnceCell<i64> = OnceCell::new();
-
-    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap), &base_timestamp);
+    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap));
 
     let mut writer = BufWriter::new(std::io::stdout().lock());
 
@@ -107,9 +97,9 @@ fn main() -> std::io::Result<()> {
         for quote in quote_iterator {
             if let Some(earliest) = heap.peek() {
                 // If the 3 second delay has passed
-                if quote.pkt_time_utc - earliest.accept_time_utc >= 3 * SEC_MICROS {
+                if quote.pkt_time - earliest.accept_time >= Timestamp::from_secs_and_nanos(3, 0) {
                     let earliest = heap.pop().unwrap();
-                    earliest.write_line(&mut writer, *base_timestamp.get().unwrap())?;
+                    earliest.write_line(&mut writer)?;
                 }
             }
 
@@ -118,11 +108,11 @@ fn main() -> std::io::Result<()> {
 
         // Print the remaining quotes
         while let Some(quote) = heap.pop() {
-            quote.write_line(&mut writer, *base_timestamp.get().unwrap())?;
+            quote.write_line(&mut writer)?;
         }
     } else {
-        for quote in quote_iterator {
-            quote.write_line(&mut writer, *base_timestamp.get().unwrap())?;
+        for quote in quote_iterator.take(10) {
+            quote.write_line(&mut writer)?;
         }
     }
 

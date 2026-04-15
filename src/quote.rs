@@ -1,9 +1,5 @@
-use crate::{CENT_MICROS, HOUR_MICROS, MIN_MICROS, QUOTE_PACKET_SIZE, SEC_MICROS, TIMEZONE_OFFSET};
-use chrono::{DateTime, Timelike};
-use std::{
-    cell::OnceCell,
-    io::{BufWriter, Write},
-};
+use crate::{QUOTE_PACKET_SIZE, time::Timestamp};
+use std::io::{BufWriter, Write};
 
 #[derive(PartialEq, Eq)]
 pub struct QuotePacket<'a> {
@@ -11,11 +7,14 @@ pub struct QuotePacket<'a> {
     pub seq_num: usize,
 
     // Packet reception time (UTC)
-    pub pkt_time_utc: i64,
+    pub pkt_time: Timestamp,
 
     // Accept time at the exchange (UTC)
     // Both timestamps need to have the same TZ for fast comparison
-    pub accept_time_utc: i64,
+    pub accept_time: Timestamp,
+
+    // UTC timestamp of midnight based on `pkt_time` above
+    pub midnight_at_timezone: Timestamp,
 
     // Payload
     pub data: &'a [u8; QUOTE_PACKET_SIZE],
@@ -30,7 +29,7 @@ impl<'a> PartialOrd for QuotePacket<'a> {
 impl<'a> Ord for QuotePacket<'a> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse the comparison for min-heap
-        match other.accept_time_utc.cmp(&self.accept_time_utc) {
+        match other.accept_time.cmp(&self.accept_time) {
             std::cmp::Ordering::Equal => {
                 // Tie-break with the `seq_num` to prevent unnecessary reordering by the
                 // `BinaryHeap`
@@ -58,78 +57,28 @@ fn parse_accept_time(data: &[u8; QUOTE_PACKET_SIZE]) -> [u64; 4] {
     [hour, min, sec, cent]
 }
 
-/// Given the number of microseconds after midnight, convert it into the HHMMSSuu format
-fn format_hhmmssuu(day_micros: i64) -> [u8; 8] {
-    #[inline(always)]
-    fn write_digits_fast<const OFFSET: usize>(buf: &mut [u8; 8], val: u8) {
-        buf[OFFSET] = (val / 10) + b'0';
-        buf[OFFSET + 1] = (val % 10) + b'0';
-    }
-
-    let mut out = [0u8; 8];
-
-    let hour = (day_micros / HOUR_MICROS) as u8;
-    let min = ((day_micros % HOUR_MICROS) / MIN_MICROS) as u8;
-    let sec = ((day_micros % MIN_MICROS) / SEC_MICROS) as u8;
-    let cent = ((day_micros % SEC_MICROS) / CENT_MICROS) as u8;
-
-    write_digits_fast::<0>(&mut out, hour);
-    write_digits_fast::<2>(&mut out, min);
-    write_digits_fast::<4>(&mut out, sec);
-    write_digits_fast::<6>(&mut out, cent);
-
-    out
-}
-
 impl<'a> QuotePacket<'a> {
-    pub fn new(
-        seq_num: usize,
-        pkt_time: i64,
-        data: &'a [u8],
-        base_timestamp: &OnceCell<i64>,
-    ) -> Option<Self> {
+    pub fn new(seq_num: usize, pkt_time: Timestamp, data: &'a [u8]) -> Option<Self> {
         if data.starts_with(b"B6034") {
             let data = data.as_array::<QUOTE_PACKET_SIZE>()?;
 
             let [hour, min, sec, cent] = parse_accept_time(data);
 
-            // Number of microseconds after midnight
-            let day_micros = (hour * (HOUR_MICROS as u64)
-                + min * (MIN_MICROS as u64) // Cast the constants instead of hour/min/sec/cent
-                + sec * (SEC_MICROS as u64)
-                + cent * (CENT_MICROS as u64)) as i64;
+            // Number of nanoseconds after midnight
+            let day_nanos = Timestamp::delta_time_after_midnight(hour, min, sec, cent);
 
-            // Avoid using `chrono::DateTime` as much as possible
-            let init_base_timestamp = || -> Option<i64> {
-                let pkt_time_dt = DateTime::from_timestamp_micros(pkt_time)?;
+            // TODO: `get_midnight_at_timezone` is somewhat slow so if all the packets are from the
+            // same day, it could be cached for better performance
+            let midnight_at_timezone =
+                pkt_time.get_midnight_at_timezone::<{ Timestamp::TIMEZONE_OFFSET }>();
 
-                // This part is relatively slow
-                let midnight_dt = pkt_time_dt
-                    .with_hour(0)?
-                    .with_minute(0)?
-                    .with_second(0)?
-                    .with_nanosecond(0)?;
-
-                // Pre-calculate a timestamp offset on the first packet so we only have to do the
-                // expensive DateTime calculation once
-                Some(midnight_dt.timestamp_micros() - TIMEZONE_OFFSET)
-            };
-
-            let delta = base_timestamp.get_or_init(|| init_base_timestamp().unwrap());
-
-            // UTC accept time, not GMT +9
-            //
-            // `day_micros` + UTC midnight timestamp == GMT +9 accept time
-            // `day_micros` + UTC midnight timestamp - `TIMEZONE_OFFSET` == UTC accept time
-            //
-            // The `TIMEZONE_OFFSET` basically gets subtracted here because of how the
-            // `base_timestamp` was initialized
-            let accept_time_utc = day_micros + *delta;
+            let accept_time = day_nanos + midnight_at_timezone;
 
             Some(Self {
                 seq_num,
-                pkt_time_utc: pkt_time,
-                accept_time_utc,
+                pkt_time,
+                accept_time,
+                midnight_at_timezone,
                 data,
             })
         } else {
@@ -140,7 +89,6 @@ impl<'a> QuotePacket<'a> {
     pub fn write_line(
         &'a self,
         writer: &mut BufWriter<std::io::StdoutLock>,
-        base_timestamp: i64,
     ) -> std::io::Result<()> {
         // 170 bytes on the stack shouldn't be a problem
         let mut line_buf = [b' ';
@@ -150,11 +98,7 @@ impl<'a> QuotePacket<'a> {
             + 10 * (7 + 1 + 5 + 1) // qty(7) + '@'(1) + price(5) + ' '|'\n'(1)
         ];
 
-        // `day_micros` is equivalent to:
-        // self.pkt_time_utc - (midnight_dt.timestamp_micros() - `TIMEZONE_OFFSET`)
-        let day_micros = self.pkt_time_utc - base_timestamp;
-
-        line_buf[0..8].copy_from_slice(&format_hhmmssuu(day_micros));
+        line_buf[0..8].copy_from_slice(&self.pkt_time.format_hhmmssuu(self.midnight_at_timezone));
         line_buf[9..17].copy_from_slice(self.accept_time());
         line_buf[18..30].copy_from_slice(self.issue_code());
 
@@ -260,8 +204,7 @@ fn test_quote_parsing() {
 
     let mmap = crate::open_mmaped_file("mdf-kospi200.20110216-0.pcap").unwrap();
 
-    let base_timestamp = OnceCell::new();
-    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap), &base_timestamp);
+    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap));
 
     assert_eq!(quote_iterator.count(), 16004);
 }

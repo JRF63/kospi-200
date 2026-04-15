@@ -1,7 +1,7 @@
-use crate::{GLOBAL_HEADER_SIZE, PACKET_HEADER_SIZE};
+use crate::{GLOBAL_HEADER_SIZE, PACKET_HEADER_SIZE, time::Timestamp};
 
 pub struct PcapPacket<'a> {
-    pub pkt_time: i64,
+    pub pkt_time: Timestamp,
     pub data: &'a [u8],
 }
 
@@ -57,7 +57,7 @@ impl<'a> Iterator for PcapIterator<'a> {
         let ts_usec = u32::from_le_bytes(pkt_header[4..8].try_into().unwrap());
         let cap_len = u32::from_le_bytes(pkt_header[8..12].try_into().unwrap()) as usize;
 
-        let pkt_time = (ts_sec as i64 * 1_000_000) + (ts_usec as i64);
+        let pkt_time = Timestamp::from_secs_and_nanos(ts_sec as i64, ts_usec as i64 * 1000);
 
         let data = {
             let start = self.offset + PACKET_HEADER_SIZE;
