@@ -1,4 +1,4 @@
-use crate::{ETHERNET_HEADER_SIZE, convert_with_offset};
+use crate::ETHERNET_HEADER_SIZE;
 
 pub struct EthernetPacket<'a> {
     pub ether_type: u16,
@@ -15,12 +15,10 @@ impl<'a> EthernetPacket<'a> {
         // | 6..12   | 6      | src_mac   | Source MAC                              |
         // | 12..14  | 2      | type      | EtherType                               |
         // +---------+--------+-----------+-----------------------------------------+
-        let ether_type = u16::from_be_bytes(convert_with_offset::<2>(data, 12)?);
+        let (header, data) = data.split_at_checked(ETHERNET_HEADER_SIZE)?;
+        let ether_type = u16::from_be_bytes(header[12..14].first_chunk::<2>().copied()?);
 
-        Some(Self {
-            ether_type,
-            data: data.get(ETHERNET_HEADER_SIZE..)?,
-        })
+        Some(Self { ether_type, data })
     }
 }
 

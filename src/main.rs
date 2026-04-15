@@ -21,6 +21,7 @@ use self::{
 const GLOBAL_HEADER_SIZE: usize = 24;
 const PACKET_HEADER_SIZE: usize = 16;
 const ETHERNET_HEADER_SIZE: usize = 14;
+const IPV4_MIN_HEADER_SIZE: usize = 20;
 const IPV6_HEADER_SIZE: usize = 40;
 const UDP_HEADER_SIZE: usize = 8;
 const QUOTE_PACKET_SIZE: usize = 215;
@@ -40,13 +41,6 @@ struct Args {
 
     /// Filename of the PCAP file
     input: String,
-}
-
-// Helper function for getting a fixed sized array from a slice.
-// This is used for converting to a u16/u32/u64 (minding the endianness).
-fn convert_with_offset<const N: usize>(data: &[u8], offset: usize) -> Option<[u8; N]> {
-    let bytes = data.get(offset..)?;
-    bytes.first_chunk::<N>().copied()
 }
 
 fn open_mmaped_file<P>(path: P) -> std::io::Result<Mmap>
