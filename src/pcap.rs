@@ -1,8 +1,7 @@
 use crate::{GLOBAL_HEADER_SIZE, PACKET_HEADER_SIZE};
 
 pub struct PcapPacket<'a> {
-    pub ts_sec: u32,
-    pub ts_usec: u32,
+    pub pkt_time: i64,
     pub data: &'a [u8],
 }
 
@@ -15,14 +14,18 @@ impl<'a> PcapIterator<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         // TODO: Return a Result/Option instead of using asserts
 
-        // PCAP data should be little endian and timestamp is in microseconds
         assert_eq!(
             u32::from_le_bytes(data[0..4].try_into().unwrap()),
-            0xa1b2c3d4
+            0xa1b2c3d4,
+            "Can only parse PCAP files that were written in little-endian and have timestamps in \
+             microseconds"
         );
 
-        // Should be ethernet
-        assert_eq!(u32::from_le_bytes(data[20..24].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(data[20..24].try_into().unwrap()),
+            1,
+            "Can only parse PCAP files that use Ethernet"
+        );
 
         Self {
             data,
@@ -54,6 +57,8 @@ impl<'a> Iterator for PcapIterator<'a> {
         let ts_usec = u32::from_le_bytes(pkt_header[4..8].try_into().unwrap());
         let cap_len = u32::from_le_bytes(pkt_header[8..12].try_into().unwrap()) as usize;
 
+        let pkt_time = (ts_sec as i64 * 1_000_000) + (ts_usec as i64);
+
         let data = {
             let start = self.offset + PACKET_HEADER_SIZE;
             let end = self.offset + PACKET_HEADER_SIZE + cap_len;
@@ -63,11 +68,7 @@ impl<'a> Iterator for PcapIterator<'a> {
         // Advance to the next PCAP packet
         self.offset += PACKET_HEADER_SIZE + cap_len;
 
-        Some(PcapPacket {
-            ts_sec,
-            ts_usec,
-            data,
-        })
+        Some(PcapPacket { pkt_time, data })
     }
 }
 

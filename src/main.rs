@@ -34,6 +34,9 @@ const CENT_MICROS: i64 = 10_000;
 
 const TIMEZONE_OFFSET: i64 = 9 * HOUR_MICROS; // KRX is GMT +9
 
+const APPROX_PACKETS_PER_SEC: usize = 1000; // Assume 1000 packets per second
+const INITIAL_HEAP_CAPACITY: usize = 3 * APPROX_PACKETS_PER_SEC; // 3 second buffer
+
 #[derive(Parser)]
 struct Args {
     /// Whether to reorder the messages according to the quote accept time
@@ -66,11 +69,7 @@ fn build_quote_iterator<'a>(
     base_timestamp: &OnceCell<i64>,
 ) -> impl Iterator<Item = QuotePacket<'a>> {
     pcap_iterator.enumerate().filter_map(|(seq_num, p)| {
-        let PcapPacket {
-            ts_sec,
-            ts_usec,
-            data,
-        } = p;
+        let PcapPacket { pkt_time, data } = p;
         let EthernetPacket { ether_type, data } = EthernetPacket::new(data)?;
         let IpPacket { protocol, data } = IpPacket::new(ether_type, data)?;
 
@@ -79,10 +78,7 @@ fn build_quote_iterator<'a>(
             let UdpPacket { dst_port, data } = UdpPacket::new(data)?;
 
             match dst_port {
-                15515..=15516 => {
-                    let pkt_time = (ts_sec as i64 * 1_000_000) + (ts_usec as i64);
-                    QuotePacket::new(seq_num, pkt_time, data, base_timestamp)
-                }
+                15515..=15516 => QuotePacket::new(seq_num, pkt_time, data, base_timestamp),
                 _ => None, // Reject packets not on ports 15515 and 15516
             }
         } else {
@@ -96,8 +92,8 @@ fn main() -> std::io::Result<()> {
 
     let mmap = open_mmaped_file(args.input)?;
 
-    // Timestamp of GMT +9 midnight. Using a `OnceCell` because this needs to be simultaneously used by the
-    // iterator and the printing logic
+    // Timestamp of GMT +9 midnight. Using a `OnceCell` because this needs to be simultaneously used
+    // by the iterator and the printing logic.
     let base_timestamp: OnceCell<i64> = OnceCell::new();
 
     let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap), &base_timestamp);
@@ -105,7 +101,8 @@ fn main() -> std::io::Result<()> {
     let mut writer = BufWriter::new(std::io::stdout().lock());
 
     if args.reorder {
-        let mut heap: BinaryHeap<QuotePacket<'_>> = BinaryHeap::new();
+        let mut heap: BinaryHeap<QuotePacket<'_>> =
+            BinaryHeap::with_capacity(INITIAL_HEAP_CAPACITY);
 
         for quote in quote_iterator {
             if let Some(earliest) = heap.peek() {

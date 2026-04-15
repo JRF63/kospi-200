@@ -32,7 +32,8 @@ impl<'a> Ord for QuotePacket<'a> {
         // Reverse the comparison for min-heap
         match other.accept_time_utc.cmp(&self.accept_time_utc) {
             std::cmp::Ordering::Equal => {
-                // Tie-break with the `seq_num` to prevent reordering by the `BinaryHeap`
+                // Tie-break with the `seq_num` to prevent unnecessary reordering by the
+                // `BinaryHeap`
                 other.seq_num.cmp(&self.seq_num)
             }
             order => order,
@@ -109,8 +110,8 @@ impl<'a> QuotePacket<'a> {
                     .with_second(0)?
                     .with_nanosecond(0)?;
 
-                // Pre-calculate a timestamp offset on the first packet so we only have to do
-                // the expensive DateTime calculation once
+                // Pre-calculate a timestamp offset on the first packet so we only have to do the
+                // expensive DateTime calculation once
                 Some(midnight_dt.timestamp_micros() - TIMEZONE_OFFSET)
             };
 
