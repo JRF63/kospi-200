@@ -7,30 +7,30 @@ pub struct PcapPacket<'a> {
 
 pub struct PcapIterator<'a> {
     data: &'a [u8],
-    offset: usize,
 }
 
 impl<'a> PcapIterator<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         // TODO: Return a Result/Option instead of using asserts
 
+        let (header, data) = data
+            .split_at_checked(GLOBAL_HEADER_SIZE)
+            .expect("Invalid PCAP file");
+
         assert_eq!(
-            u32::from_le_bytes(data[0..4].try_into().unwrap()),
+            u32::from_le_bytes(*header[0..4].first_chunk::<4>().unwrap()),
             0xa1b2c3d4,
             "Can only parse PCAP files that were written in little-endian and have timestamps in \
              microseconds"
         );
 
         assert_eq!(
-            u32::from_le_bytes(data[20..24].try_into().unwrap()),
+            u32::from_le_bytes(*header[20..24].first_chunk::<4>().unwrap()),
             1,
             "Can only parse PCAP files that use Ethernet"
         );
 
-        Self {
-            data,
-            offset: GLOBAL_HEADER_SIZE, // Skip global header
-        }
+        Self { data }
     }
 }
 
@@ -47,28 +47,26 @@ impl<'a> Iterator for PcapIterator<'a> {
         // | 8..12   | 4      | cap_len  | Number of bytes actually saved in file   |
         // | 12..16  | 4      | orig_len | Original length of packet on the wire    |
         // +---------+--------+----------+------------------------------------------+
-        let pkt_header: &[u8; PACKET_HEADER_SIZE] = {
-            let header_bytes: &[u8] = self.data.get(self.offset..)?;
-            header_bytes.first_chunk::<_>()?
-        };
+        let (header, tail) = self.data.split_at_checked(PACKET_HEADER_SIZE)?;
 
-        // The following `unwrap`s should be optimized out since `pkt_header` is a `&[u8; 16]`
-        let ts_sec = u32::from_le_bytes(pkt_header[0..4].try_into().unwrap());
-        let ts_usec = u32::from_le_bytes(pkt_header[4..8].try_into().unwrap());
-        let cap_len = u32::from_le_bytes(pkt_header[8..12].try_into().unwrap()) as usize;
+        // Bounds checking for the following should be optimized out since the len of `header` is
+        // known at compile time
+        let ts_sec = u32::from_le_bytes(*header[0..4].first_chunk::<4>()?);
+        let ts_usec = u32::from_le_bytes(*header[4..8].first_chunk::<4>()?);
+        let cap_len = u32::from_le_bytes(*header[8..12].first_chunk::<4>()?);
 
-        let pkt_time = Timestamp::from_secs_and_nanos(ts_sec as i64, ts_usec as i64 * 1000);
+        // `?` stops the iterator here if there's not enough data
+        let (payload, next_data) = tail.split_at_checked(cap_len as usize)?;
 
-        let data = {
-            let start = self.offset + PACKET_HEADER_SIZE;
-            let end = self.offset + PACKET_HEADER_SIZE + cap_len;
-            self.data.get(start..end)? // Stops the iterator if not enough data
+        let packet = PcapPacket {
+            pkt_time: Timestamp::from_secs_and_nanos(ts_sec as i64, ts_usec as i64 * 1000),
+            data: payload,
         };
 
         // Advance to the next PCAP packet
-        self.offset += PACKET_HEADER_SIZE + cap_len;
+        self.data = next_data;
 
-        Some(PcapPacket { pkt_time, data })
+        Some(packet)
     }
 }
 
