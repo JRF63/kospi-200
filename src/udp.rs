@@ -17,7 +17,7 @@ impl<'a> UdpPacket<'a> {
         // | 6..8    | 2      | checksum  | Checksum                                |
         // +---------+--------+-----------+-----------------------------------------+
         let (header, data) = data.split_at_checked(UDP_HEADER_SIZE)?;
-        let dst_port = u16::from_be_bytes(header[2..4].first_chunk::<2>().copied()?);
+        let dst_port = u16::from_be_bytes(header[2..4].as_array().copied()?);
 
         Some(Self { dst_port, data })
     }

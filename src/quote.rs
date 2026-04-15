@@ -13,7 +13,7 @@ pub struct QuotePacket<'a> {
     // Both timestamps need to have the same TZ for fast comparison
     pub accept_time: Timestamp,
 
-    // UTC timestamp of midnight based on `pkt_time` above
+    // Midnight of the day that the packet was accepted at the exchange
     pub midnight_at_timezone: Timestamp,
 
     // Payload
@@ -40,37 +40,17 @@ impl<'a> Ord for QuotePacket<'a> {
     }
 }
 
-/// Optimized parsing of HHMMSSuu
-fn parse_accept_time(data: &[u8; QUOTE_PACKET_SIZE]) -> [u64; 4] {
-    let bytes: [u8; 8] = *data[206..214].as_array().unwrap();
-
-    let val = u64::from_le_bytes(bytes);
-
-    // Subtract ASCII '0' from all 8 bytes
-    let digits = val - 0x3030303030303030;
-
-    let hour = (digits & 0xFF) * 10 + ((digits >> 8) & 0xFF);
-    let min = ((digits >> 16) & 0xFF) * 10 + ((digits >> 24) & 0xFF);
-    let sec = ((digits >> 32) & 0xFF) * 10 + ((digits >> 40) & 0xFF);
-    let cent = ((digits >> 48) & 0xFF) * 10 + ((digits >> 56) & 0xFF);
-
-    [hour, min, sec, cent]
-}
-
 impl<'a> QuotePacket<'a> {
     pub fn new(seq_num: usize, pkt_time: Timestamp, data: &'a [u8]) -> Option<Self> {
         if data.starts_with(b"B6034") {
             let data = data.as_array::<QUOTE_PACKET_SIZE>()?;
 
-            let [hour, min, sec, cent] = parse_accept_time(data);
-
             // Number of nanoseconds after midnight
-            let day_nanos = Timestamp::delta_time_after_midnight(hour, min, sec, cent);
+            let day_nanos = Timestamp::hhmmssuu_to_midnight_delta(data[206..214].as_array()?);
 
             // TODO: `get_midnight_at_timezone` is somewhat slow so if all the packets are from the
             // same day, it could be cached for better performance
-            let midnight_at_timezone =
-                pkt_time.get_midnight_at_timezone::<{ Timestamp::TIMEZONE_OFFSET }>();
+            let midnight_at_timezone = pkt_time.get_midnight_at_timezone(Timestamp::TIMEZONE_KST);
 
             let accept_time = day_nanos + midnight_at_timezone;
 
@@ -137,6 +117,8 @@ impl<'a> QuotePacket<'a> {
     }
 }
 
+// Helper macro for reading the fields of the quote packets. This implementation just reads the
+// fields as fixed-sized byte arrays.
 macro_rules! generate_getters {
     ($($name:ident, $start:expr, $end:expr);*) => {
         impl<'a> QuotePacket<'a> {
@@ -187,23 +169,10 @@ generate_getters! {
 }
 
 #[test]
-fn test_parse_accept_time() {
-    let mut data = [0; QUOTE_PACKET_SIZE];
-    data[206..214].copy_from_slice(b"12304580");
-    let [hour, min, sec, cent] = parse_accept_time(&data);
-
-    assert_eq!(hour, 12);
-    assert_eq!(min, 30);
-    assert_eq!(sec, 45);
-    assert_eq!(cent, 80);
-}
-
-#[test]
 fn test_quote_parsing() {
     use crate::{build_quote_iterator, pcap::PcapIterator};
 
     let mmap = crate::open_mmaped_file("mdf-kospi200.20110216-0.pcap").unwrap();
-
     let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap));
 
     assert_eq!(quote_iterator.count(), 16004);

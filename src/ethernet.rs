@@ -16,7 +16,7 @@ impl<'a> EthernetPacket<'a> {
         // | 12..14  | 2      | type      | EtherType                               |
         // +---------+--------+-----------+-----------------------------------------+
         let (header, data) = data.split_at_checked(ETHERNET_HEADER_SIZE)?;
-        let ether_type = u16::from_be_bytes(header[12..14].first_chunk::<2>().copied()?);
+        let ether_type = u16::from_be_bytes(header[12..14].as_array().copied()?);
 
         Some(Self { ether_type, data })
     }

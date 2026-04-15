@@ -18,14 +18,14 @@ impl<'a> PcapIterator<'a> {
             .expect("Invalid PCAP file");
 
         assert_eq!(
-            u32::from_le_bytes(*header[0..4].first_chunk::<4>().unwrap()),
+            u32::from_le_bytes(*header[0..4].as_array().unwrap()),
             0xa1b2c3d4,
             "Can only parse PCAP files that were written in little-endian and have timestamps in \
              microseconds"
         );
 
         assert_eq!(
-            u32::from_le_bytes(*header[20..24].first_chunk::<4>().unwrap()),
+            u32::from_le_bytes(*header[20..24].as_array().unwrap()),
             1,
             "Can only parse PCAP files that use Ethernet"
         );
@@ -51,9 +51,9 @@ impl<'a> Iterator for PcapIterator<'a> {
 
         // Bounds checking for the following should be optimized out since the len of `header` is
         // known at compile time
-        let ts_sec = u32::from_le_bytes(*header[0..4].first_chunk::<4>()?);
-        let ts_usec = u32::from_le_bytes(*header[4..8].first_chunk::<4>()?);
-        let cap_len = u32::from_le_bytes(*header[8..12].first_chunk::<4>()?);
+        let ts_sec = u32::from_le_bytes(*header[0..4].as_array()?);
+        let ts_usec = u32::from_le_bytes(*header[4..8].as_array()?);
+        let cap_len = u32::from_le_bytes(*header[8..12].as_array()?);
 
         // `?` stops the iterator here if there's not enough data
         let (payload, next_data) = tail.split_at_checked(cap_len as usize)?;
