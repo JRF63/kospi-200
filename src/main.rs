@@ -105,7 +105,7 @@ fn main() -> std::io::Result<()> {
             quote.write_line(&mut writer)?;
         }
     } else {
-        for quote in quote_iterator.take(10) {
+        for quote in quote_iterator {
             quote.write_line(&mut writer)?;
         }
     }
