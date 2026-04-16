@@ -41,6 +41,9 @@ impl<'a> IpPacket<'a> {
 
         // IHL is not 5
         } else {
+            // Assume the packets don't use IPv4 options
+            core::hint::cold_path();
+
             let ihl = ver_ihl & 0b1111;
             let header_size = (ihl as usize) * 4;
 
@@ -54,6 +57,9 @@ impl<'a> IpPacket<'a> {
     }
 
     fn new_ipv6(data: &'a [u8]) -> Option<Self> {
+        // Assume the packets are always IPv4
+        core::hint::cold_path();
+
         // IPv6 Header (40 bytes)
         // +---------+--------+-----------+-----------------------------------------+
         // | Offset  | Size   | Field     | Description                             |
