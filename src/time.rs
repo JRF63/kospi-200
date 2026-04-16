@@ -36,27 +36,27 @@ impl Timestamp {
     pub fn hhmmssuu_to_midnight_delta(bytes: &[u8; 8]) -> Self {
         let [hour, min, sec, cent] = Timestamp::parse_hhmmssuu(bytes);
 
-        // NOTE: Casting the constants instead of hour/min/sec/cent should be faster
-        let day_nanos = hour * (NANOS_PER_HOUR as u64)
-            + min * (NANOS_PER_MIN as u64)
-            + sec * (NANOS_PER_SEC as u64)
-            + cent * (NANOS_PER_CENT as u64);
-        Self(day_nanos as i64)
+        let day_nanos = hour * NANOS_PER_HOUR
+            + min * NANOS_PER_MIN
+            + sec * NANOS_PER_SEC
+            + cent * NANOS_PER_CENT;
+        Self(day_nanos)
     }
 
-    fn parse_hhmmssuu(bytes: &[u8; 8]) -> [u64; 4] {
+    pub fn parse_hhmmssuu(bytes: &[u8; 8]) -> [i64; 4] {
         // Read everything into a u64
         let val = u64::from_le_bytes(*bytes);
 
         // Subtract ASCII '0' from all 8 bytes simultaneously
         let digits = val - 0x3030303030303030;
 
+        // NOTE: Multiplying by 10 simultaneously is slower
         let hour = (digits & 0xFF) * 10 + ((digits >> 8) & 0xFF);
         let min = ((digits >> 16) & 0xFF) * 10 + ((digits >> 24) & 0xFF);
         let sec = ((digits >> 32) & 0xFF) * 10 + ((digits >> 40) & 0xFF);
         let cent = ((digits >> 48) & 0xFF) * 10 + ((digits >> 56) & 0xFF);
 
-        [hour, min, sec, cent]
+        [hour as i64, min as i64, sec as i64, cent as i64]
     }
 
     /// Returns the midnight timestamp at the given timezone
