@@ -28,12 +28,13 @@ fn main() -> std::io::Result<()> {
     let mut writer = BufWriter::new(std::io::stdout().lock());
 
     if args.reorder {
+        // Stores the quotes in order of increasing accept time
         let mut heap: BinaryHeap<QuotePacket<'_>> =
             BinaryHeap::with_capacity(INITIAL_HEAP_CAPACITY);
 
         for quote in quote_iterator {
             if let Some(earliest) = heap.peek() {
-                // If the 3 second delay has passed
+                // If the 3 second delay has passed, print the earliest quote in the heap
                 if quote.pkt_time - earliest.accept_time >= Timestamp::from_secs_and_nanos(3, 0) {
                     let earliest = heap.pop().unwrap();
                     earliest.write_line(&mut writer)?;
@@ -48,6 +49,7 @@ fn main() -> std::io::Result<()> {
             quote.write_line(&mut writer)?;
         }
     } else {
+        // Prints the quotes in the order they appear on the file
         for quote in quote_iterator {
             quote.write_line(&mut writer)?;
         }

@@ -66,6 +66,7 @@ impl<'a> QuotePacket<'a> {
         }
     }
 
+    #[inline]
     pub fn write_line(
         &'a self,
         writer: &mut BufWriter<std::io::StdoutLock>,

@@ -17,18 +17,20 @@ pub use self::{
     udp::UdpPacket,
 };
 
-const GLOBAL_HEADER_SIZE: usize = 24;
-const PACKET_HEADER_SIZE: usize = 16;
-const ETHERNET_HEADER_SIZE: usize = 14;
-const IPV4_MIN_HEADER_SIZE: usize = 20;
-const IPV6_HEADER_SIZE: usize = 40;
-const UDP_HEADER_SIZE: usize = 8;
-const QUOTE_PACKET_SIZE: usize = 215;
+pub const GLOBAL_HEADER_SIZE: usize = 24;
+pub const PACKET_HEADER_SIZE: usize = 16;
+pub const ETHERNET_HEADER_SIZE: usize = 14;
+pub const IPV4_MIN_HEADER_SIZE: usize = 20;
+pub const IPV6_HEADER_SIZE: usize = 40;
+pub const UDP_HEADER_SIZE: usize = 8;
+pub const QUOTE_PACKET_SIZE: usize = 215;
 
-const ETHER_TYPE_IPV4: u16 = 0x0800;
-const ETHER_TYPE_IPV6: u16 = 0x86DD;
-const PROTOCOL_NUMBER_UDP: u8 = 0x11;
+pub const ETHER_TYPE_IPV4: u16 = 0x0800;
+pub const ETHER_TYPE_IPV6: u16 = 0x86DD;
+pub const PROTOCOL_NUMBER_UDP: u8 = 0x11;
 
+/// mmap's a file to avoid loading it all into memory.
+#[inline]
 pub fn open_mmaped_file<P>(path: P) -> std::io::Result<Mmap>
 where
     P: AsRef<Path>,
@@ -36,9 +38,15 @@ where
     let file = File::open(path)?;
 
     // SAFETY: Safe assuming no other process modifies the underlying file
-    unsafe { Mmap::map(&file) }
+    let mmap = unsafe { Mmap::map(&file)? };
+
+    mmap.advise(memmap2::Advice::Sequential)?;
+
+    Ok(mmap)
 }
 
+/// Creates a quote iterator from a raw PCAP iterator.
+#[inline]
 pub fn build_quote_iterator<'a>(
     pcap_iterator: PcapIterator<'a>,
 ) -> impl Iterator<Item = QuotePacket<'a>> {
@@ -52,7 +60,7 @@ pub fn build_quote_iterator<'a>(
             let UdpPacket { dst_port, data } = UdpPacket::new(data)?;
 
             match dst_port {
-                15515..=15516 => QuotePacket::new(seq_num, pkt_time, data),
+                15515 | 15516 => QuotePacket::new(seq_num, pkt_time, data),
                 _ => None, // Reject packets not on ports 15515 and 15516
             }
         } else {
