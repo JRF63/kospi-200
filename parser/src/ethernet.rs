@@ -26,7 +26,7 @@ impl<'a> EthernetPacket<'a> {
 fn test_ethernet_parsing() {
     use crate::pcap::{PcapIterator, PcapPacket};
 
-    let mmap = crate::open_mmaped_file("mdf-kospi200.20110216-0.pcap").unwrap();
+    let mmap = crate::open_mmaped_file("../dataset/mdf-kospi200.20110216-0.pcap").unwrap();
     let iterator = PcapIterator::new(&mmap);
 
     assert_eq!(

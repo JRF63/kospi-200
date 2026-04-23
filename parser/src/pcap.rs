@@ -73,7 +73,7 @@ impl<'a> Iterator for PcapIterator<'a> {
 
 #[test]
 fn test_pcap_parsing() {
-    let mmap = crate::open_mmaped_file("mdf-kospi200.20110216-0.pcap").unwrap();
+    let mmap = crate::open_mmaped_file("../dataset/mdf-kospi200.20110216-0.pcap").unwrap();
     let iterator = PcapIterator::new(&mmap);
 
     assert_eq!(iterator.count(), 21273);

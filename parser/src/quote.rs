@@ -170,7 +170,7 @@ generate_getters! {
 fn test_quote_parsing() {
     use crate::{build_quote_iterator, pcap::PcapIterator};
 
-    let mmap = crate::open_mmaped_file("mdf-kospi200.20110216-0.pcap").unwrap();
+    let mmap = crate::open_mmaped_file("../dataset/mdf-kospi200.20110216-0.pcap").unwrap();
     let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap));
 
     assert_eq!(quote_iterator.count(), 16004);
