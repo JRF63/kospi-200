@@ -1,5 +1,4 @@
 use crate::{QUOTE_PACKET_SIZE, time::Timestamp};
-use std::io::{BufWriter, Write};
 
 #[derive(PartialEq, Eq)]
 pub struct QuotePacket<'a> {
@@ -66,11 +65,11 @@ impl<'a> QuotePacket<'a> {
         }
     }
 
+    /// Format this quote packet as a fixed-width output line.
+    ///
+    /// The returned buffer contains the packet fields in text form, including a trailing newline.
     #[inline]
-    pub fn write_line(
-        &'a self,
-        writer: &mut BufWriter<std::io::StdoutLock>,
-    ) -> std::io::Result<()> {
+    pub fn to_line_bytes(&'a self) -> [u8; 171] {
         // 170 bytes on the stack shouldn't be a problem
         let mut line_buf = [b' ';
             8 + 1 // pkt-time
@@ -112,9 +111,7 @@ impl<'a> QuotePacket<'a> {
 
         line_buf[170] = b'\n';
 
-        writer.write_all(&line_buf)?;
-
-        Ok(())
+        line_buf
     }
 }
 

@@ -37,6 +37,7 @@ impl<'a> PcapIterator<'a> {
 impl<'a> Iterator for PcapIterator<'a> {
     type Item = PcapPacket<'a>;
 
+    // This is difficult to parallelize because of the need to read `cap_len` from the header
     fn next(&mut self) -> Option<Self::Item> {
         // PCAP Packet Header (16 bytes)
         // +---------+--------+----------+------------------------------------------+
