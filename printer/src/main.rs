@@ -35,12 +35,14 @@ fn main() -> std::io::Result<()> {
             BinaryHeap::with_capacity(INITIAL_HEAP_CAPACITY);
 
         for quote in quote_iterator {
-            if let Some(earliest) = heap.peek() {
+            while let Some(earliest) = heap.peek() {
                 // If the 3 second delay has passed, print the earliest quote in the heap
                 if quote.pkt_time - earliest.accept_time >= Timestamp::from_secs_and_nanos(3, 0) {
                     let earliest = heap.pop().unwrap();
                     let line = earliest.to_line_bytes();
                     writer.write_all(&line)?;
+                } else {
+                    break;
                 }
             }
 
