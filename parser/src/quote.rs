@@ -1,4 +1,12 @@
-use crate::{QUOTE_PACKET_SIZE, time::Timestamp};
+use crate::{
+    PROTOCOL_NUMBER_UDP, QUOTE_PACKET_SIZE,
+    ethernet::EthernetPacket,
+    ip::IpPacket,
+    pcap::{PcapIterator, PcapPacket},
+    time::Timestamp,
+    udp::UdpPacket,
+};
+use std::{collections::BinaryHeap, iter::FusedIterator};
 
 #[derive(PartialEq, Eq)]
 pub struct QuotePacket<'a> {
@@ -166,12 +174,111 @@ generate_getters! {
     ask_5_quantity, 149, 156
 }
 
+pub struct QuoteIterator<'a> {
+    seq_num: usize,
+    pcap_iterator: PcapIterator<'a>,
+}
+
+impl<'a> QuoteIterator<'a> {
+    pub fn new(pcap_iterator: PcapIterator<'a>) -> Self {
+        Self {
+            seq_num: 0,
+            pcap_iterator,
+        }
+    }
+}
+
+impl<'a> FusedIterator for QuoteIterator<'a> {}
+
+impl<'a> Iterator for QuoteIterator<'a> {
+    type Item = QuotePacket<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        #[inline(always)]
+        fn try_map_to_quote<'b>(
+            pcap_packet: PcapPacket<'b>,
+            seq_num: usize,
+        ) -> Option<QuotePacket<'b>> {
+            let PcapPacket { pkt_time, data } = pcap_packet;
+            let EthernetPacket { ether_type, data } = EthernetPacket::new(data)?;
+            let IpPacket { protocol, data } = IpPacket::new(ether_type, data)?;
+
+            // Only accept UDP packets
+            if protocol == PROTOCOL_NUMBER_UDP {
+                let UdpPacket { dst_port, data } = UdpPacket::new(data)?;
+
+                match dst_port {
+                    15515 | 15516 => QuotePacket::new(seq_num, pkt_time, data),
+                    _ => None, // Reject packets not on ports 15515 and 15516
+                }
+            } else {
+                None
+            }
+        }
+
+        for pcap_packet in self.pcap_iterator.by_ref() {
+            match try_map_to_quote(pcap_packet, self.seq_num) {
+                Some(quote) => {
+                    self.seq_num += 1;
+                    return Some(quote);
+                }
+                None => continue,
+            }
+        }
+
+        None
+    }
+}
+
+pub struct SortedQuoteIterator<'a> {
+    quote_iterator: QuoteIterator<'a>,
+    heap: BinaryHeap<QuotePacket<'a>>,
+}
+
+impl<'a> SortedQuoteIterator<'a> {
+    pub fn new(pcap_iterator: PcapIterator<'a>, init_capacity: usize) -> Self {
+        Self {
+            quote_iterator: QuoteIterator::new(pcap_iterator),
+            heap: BinaryHeap::with_capacity(init_capacity),
+        }
+    }
+}
+
+impl<'a> FusedIterator for SortedQuoteIterator<'a> {}
+
+impl<'a> Iterator for SortedQuoteIterator<'a> {
+    type Item = QuotePacket<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for quote in self.quote_iterator.by_ref() {
+            // Save the latest `pkt_time` before moving the quote to the heap
+            let current_time = quote.pkt_time;
+
+            self.heap.push(quote);
+
+            // Return the earliest quote in the heap if it's older than 3 seconds.
+            // Note this is "lazy" - it only returns one quote per quote that's pushed in the heap.
+            if let Some(earliest) = self.heap.peek()
+                && current_time - earliest.accept_time >= Timestamp::from_secs_and_nanos(3, 0)
+            {
+                let earliest = self.heap.pop().unwrap();
+                return Some(earliest);
+            }
+        }
+
+        if let Some(quote) = self.heap.pop() {
+            return Some(quote);
+        }
+
+        None
+    }
+}
+
 #[test]
 fn test_quote_parsing() {
-    use crate::{build_quote_iterator, pcap::PcapIterator};
-
     let mmap = crate::open_mmaped_file("../dataset/mdf-kospi200.20110216-0.pcap").unwrap();
-    let quote_iterator = build_quote_iterator(PcapIterator::new(&mmap));
+    let pcap_iterator = PcapIterator::new(&mmap);
+    let quote_iterator = SortedQuoteIterator::new(pcap_iterator, 3000);
 
     assert_eq!(quote_iterator.count(), 16004);
 }

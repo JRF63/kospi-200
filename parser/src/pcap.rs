@@ -1,3 +1,5 @@
+use std::iter::FusedIterator;
+
 use crate::{GLOBAL_HEADER_SIZE, PACKET_HEADER_SIZE, time::Timestamp};
 
 pub struct PcapPacket<'a> {
@@ -33,6 +35,8 @@ impl<'a> PcapIterator<'a> {
         Self { data }
     }
 }
+
+impl<'a> FusedIterator for PcapIterator<'a> {}
 
 impl<'a> Iterator for PcapIterator<'a> {
     type Item = PcapPacket<'a>;

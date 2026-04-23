@@ -12,7 +12,7 @@ pub use self::{
     ethernet::EthernetPacket,
     ip::IpPacket,
     pcap::{PcapIterator, PcapPacket},
-    quote::QuotePacket,
+    quote::{QuoteIterator, QuotePacket, SortedQuoteIterator},
     time::Timestamp,
     udp::UdpPacket,
 };
@@ -43,28 +43,4 @@ where
     mmap.advise(memmap2::Advice::Sequential)?;
 
     Ok(mmap)
-}
-
-/// Creates a quote iterator from a raw PCAP iterator.
-#[inline]
-pub fn build_quote_iterator<'a>(
-    pcap_iterator: PcapIterator<'a>,
-) -> impl Iterator<Item = QuotePacket<'a>> {
-    pcap_iterator.enumerate().filter_map(|(seq_num, p)| {
-        let PcapPacket { pkt_time, data } = p;
-        let EthernetPacket { ether_type, data } = EthernetPacket::new(data)?;
-        let IpPacket { protocol, data } = IpPacket::new(ether_type, data)?;
-
-        // Only accept UDP packets
-        if protocol == PROTOCOL_NUMBER_UDP {
-            let UdpPacket { dst_port, data } = UdpPacket::new(data)?;
-
-            match dst_port {
-                15515 | 15516 => QuotePacket::new(seq_num, pkt_time, data),
-                _ => None, // Reject packets not on ports 15515 and 15516
-            }
-        } else {
-            None
-        }
-    })
 }
