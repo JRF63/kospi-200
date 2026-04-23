@@ -1,14 +1,14 @@
 //! Generates a PCAP file for benchmarking
 
 use clap::Parser;
+use kospi_parser::{
+    ETHERNET_HEADER_SIZE, IPV4_MIN_HEADER_SIZE, QUOTE_PACKET_SIZE, Timestamp, UDP_HEADER_SIZE,
+};
 use pcap_file::pcap::{PcapPacket, PcapWriter};
 use rand_core::SeedableRng;
 use rand_distr::{Distribution, Exp};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::{collections::BinaryHeap, fs::File, io::BufWriter, time::Duration};
-use tsuru_challenge::{
-    ETHERNET_HEADER_SIZE, IPV4_MIN_HEADER_SIZE, QUOTE_PACKET_SIZE, Timestamp, UDP_HEADER_SIZE,
-};
 
 const NETWORK_HEADERS_SIZE: usize = ETHERNET_HEADER_SIZE + IPV4_MIN_HEADER_SIZE + UDP_HEADER_SIZE;
 // Valid header taken from mdf-kospi200.20110216-0.pcap
@@ -61,7 +61,7 @@ impl PartialOrd for DummyQuotePacket {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let file = File::create(format!("benchmark-{}.pcap", args.num_packets))?;
+    let file = File::create(format!("dataset/benchmark-{}.pcap", args.num_packets))?;
 
     // Default PcapWriter
     let mut writer = PcapWriter::new(BufWriter::new(file))?;

@@ -1,0 +1,8 @@
+[package]
+name = "kospi-printer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kospi-parser = { workspace = true }
+clap = { workspace = true }

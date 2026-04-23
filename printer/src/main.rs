@@ -1,9 +1,7 @@
 use clap::Parser;
 use std::{collections::BinaryHeap, io::BufWriter};
 
-use tsuru_challenge::{
-    PcapIterator, QuotePacket, Timestamp, build_quote_iterator, open_mmaped_file,
-};
+use kospi_parser::{PcapIterator, QuotePacket, Timestamp, build_quote_iterator, open_mmaped_file};
 
 const APPROX_PACKETS_PER_SEC: usize = 1000; // Assume 1000 packets per second
 const INITIAL_HEAP_CAPACITY: usize = 3 * APPROX_PACKETS_PER_SEC; // 3 second buffer
