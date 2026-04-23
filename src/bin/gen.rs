@@ -5,7 +5,7 @@ use pcap_file::pcap::{PcapPacket, PcapWriter};
 use rand_core::SeedableRng;
 use rand_distr::{Distribution, Exp};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use std::{fs::File, io::BufWriter, time::Duration};
+use std::{collections::BinaryHeap, fs::File, io::BufWriter, time::Duration};
 use tsuru_challenge::{
     ETHERNET_HEADER_SIZE, IPV4_MIN_HEADER_SIZE, QUOTE_PACKET_SIZE, Timestamp, UDP_HEADER_SIZE,
 };
@@ -31,10 +31,31 @@ const START_TIME: i64 = START_SECS * NANOS_PER_SEC + START_NANOS;
 // 9 AM
 const EXCHANGE_OPENING_TIME: i64 = 9 * NANOS_PER_HOUR;
 
+const THREE_SECONDS: Duration = Duration::from_secs(3);
+
 #[derive(Parser)]
 struct Args {
     /// Number of valid quote packets to generate
     num_packets: usize,
+}
+
+#[derive(PartialEq, Eq)]
+struct DummyQuotePacket {
+    timestamp: Duration,
+    data: Vec<u8>,
+}
+
+// For sorting in order of increasing timestamp
+impl Ord for DummyQuotePacket {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.timestamp.cmp(&self.timestamp)
+    }
+}
+
+impl PartialOrd for DummyQuotePacket {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,11 +70,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exp = Exp::new(2.0)?;
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xF0F0F0F0F0F0F0F0);
 
-    let mut packet_payload = Vec::with_capacity(NETWORK_HEADERS_SIZE + QUOTE_PACKET_SIZE);
     let mut accept_time = EXCHANGE_OPENING_TIME;
+
+    let mut packets: BinaryHeap<DummyQuotePacket> = BinaryHeap::new();
 
     // TODO: Maybe generate ARP (0x0806) and raw 802.3
     for counter in 0..(args.num_packets) {
+        let mut packet_payload = Vec::with_capacity(NETWORK_HEADERS_SIZE + QUOTE_PACKET_SIZE);
         packet_payload.extend_from_slice(&NETWORK_HEADERS);
 
         let quote_data = gen_quote(counter, accept_time);
@@ -65,8 +88,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Duration::from_nanos((accept_time + (START_TIME - Timestamp::TIMEZONE_KST)) as u64);
 
             let delay = {
-                const THREE_SECONDS: Duration = Duration::from_secs(3);
-
                 let delay = Duration::from_secs_f64(exp.sample(&mut rng));
 
                 // Limit to a max of 3 seconds delay
@@ -80,14 +101,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             accept_timestamp + delay
         };
 
-        writer.write_packet(&PcapPacket {
-            timestamp: packet_timestamp,
-            orig_len: packet_payload.len() as u32,
-            data: packet_payload.as_slice().into(),
-        })?;
+        if let Some(earliest) = packets.peek()
+            && packet_timestamp - earliest.timestamp >= THREE_SECONDS
+        {
+            let DummyQuotePacket { timestamp, data } = packets.pop().unwrap();
+            writer.write_packet(&PcapPacket {
+                timestamp,
+                orig_len: data.len() as u32,
+                data: data.into(),
+            })?;
+        }
 
-        packet_payload.clear();
+        packets.push(DummyQuotePacket {
+            timestamp: packet_timestamp,
+            data: packet_payload,
+        });
+
         accept_time += NANOS_PER_PACKET;
+    }
+
+    while let Some(DummyQuotePacket { timestamp, data }) = packets.pop() {
+        writer.write_packet(&PcapPacket {
+            timestamp,
+            orig_len: data.len() as u32,
+            data: data.into(),
+        })?;
     }
 
     Ok(())
