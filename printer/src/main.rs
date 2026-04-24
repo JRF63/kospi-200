@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::io::{BufWriter, Write};
 
-use kospi_parser::{PcapIterator, QuoteIterator, SortedQuoteIterator, open_mmaped_file};
+use kospi_parser::{PcapIterator, QuoteIterator, SortedQuoteIteratorHeap, open_mmaped_file};
 
 const APPROX_PACKETS_PER_SEC: usize = 1000; // Assume 1000 packets per second
 const INITIAL_HEAP_CAPACITY: usize = 3 * APPROX_PACKETS_PER_SEC; // 3 second buffer
@@ -26,7 +26,7 @@ fn main() -> std::io::Result<()> {
     let mut writer = BufWriter::with_capacity(STDOUT_BUF_SIZE, std::io::stdout().lock());
 
     if args.reorder {
-        let quote_iterator = SortedQuoteIterator::new(pcap_iterator, INITIAL_HEAP_CAPACITY);
+        let quote_iterator = SortedQuoteIteratorHeap::new(pcap_iterator, INITIAL_HEAP_CAPACITY);
 
         // Prints the quote in order of ascending accept time
         for quote in quote_iterator {

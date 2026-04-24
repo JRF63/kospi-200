@@ -1,6 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use kospi_parser::{
-    PcapIterator, QuoteIterator, SortedQuoteIterator2, Timestamp, open_mmaped_file,
+    PcapIterator, QuoteIterator, SortedQuoteIteratorBuckets, SortedQuoteIteratorHeap, Timestamp,
+    open_mmaped_file,
 };
 use std::hint::black_box;
 
@@ -30,11 +31,20 @@ fn criterion_benchmark(c: &mut Criterion) {
         })
     });
 
-    c.bench_function("sorted quote iterator", |b| {
+    c.bench_function("sorted quote iterator (heap)", |b| {
         b.iter(|| {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
             let pcap_iterator = PcapIterator::new(&mmap);
-            let quote_iterator = SortedQuoteIterator2::new(pcap_iterator, 3000);
+            let quote_iterator = SortedQuoteIteratorHeap::new(pcap_iterator, 3000);
+            let lines = quote_iterator.map(|x| x.to_line_bytes());
+            lines.count()
+        })
+    });
+    c.bench_function("sorted quote iterator (buckets)", |b| {
+        b.iter(|| {
+            let mmap = open_mmaped_file(black_box(filename)).unwrap();
+            let pcap_iterator = PcapIterator::new(&mmap);
+            let quote_iterator = SortedQuoteIteratorBuckets::new(pcap_iterator, 3000);
             let lines = quote_iterator.map(|x| x.to_line_bytes());
             lines.count()
         })
