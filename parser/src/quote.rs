@@ -1,3 +1,5 @@
+use smallvec::SmallVec;
+
 use crate::{
     PROTOCOL_NUMBER_UDP, QUOTE_PACKET_SIZE,
     ethernet::EthernetPacket,
@@ -8,7 +10,7 @@ use crate::{
 };
 use std::{collections::BinaryHeap, iter::FusedIterator};
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct QuotePacket<'a> {
     // Used for "stable" sorting
     pub seq_num: usize,
@@ -274,11 +276,128 @@ impl<'a> Iterator for SortedQuoteIterator<'a> {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct Bucket<'a> {
+    vec: SmallVec<[QuotePacket<'a>; 4]>,
+}
+
+// Need at least 300 (3 seconds + centisecond resolution) but use the nearest power of two to make
+// modulo calculations faster
+const BUCKET_LEN: usize = 512;
+
+pub struct SortedQuoteIterator2<'a> {
+    quote_iterator: QuoteIterator<'a>,
+    buckets: Box<[Bucket<'a>; BUCKET_LEN]>,
+    emit_idx: Option<usize>,
+    safe_idx: Option<usize>,
+    last_idx: Option<usize>,
+}
+
+impl<'a> SortedQuoteIterator2<'a> {
+    pub fn new(pcap_iterator: PcapIterator<'a>, _init_capacity: usize) -> Self {
+        Self {
+            quote_iterator: QuoteIterator::new(pcap_iterator),
+            buckets: vec![Default::default(); BUCKET_LEN].try_into().unwrap(),
+            emit_idx: None,
+            safe_idx: None,
+            last_idx: None,
+        }
+    }
+}
+
+impl<'a> FusedIterator for SortedQuoteIterator2<'a> {}
+
+impl<'a> Iterator for SortedQuoteIterator2<'a> {
+    type Item = QuotePacket<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        fn try_emit<'b>(
+            emit_idx: &mut usize,
+            safe_idx: usize,
+            buckets: &mut Box<[Bucket<'b>; BUCKET_LEN]>,
+        ) -> Option<QuotePacket<'b>> {
+            let (diff, _) = safe_idx.overflowing_sub(*emit_idx);
+            let can_emit = diff as isize >= 0;
+
+            if can_emit {
+                let mut next_idx = *emit_idx;
+                while next_idx != safe_idx {
+                    let bucket = buckets.get_mut(next_idx).unwrap();
+                    if !bucket.vec.is_empty() {
+                        *emit_idx = next_idx;
+                        let quote = bucket.vec.remove(0);
+                        return Some(quote);
+                    }
+                    next_idx = (next_idx + 1) % BUCKET_LEN;
+                }
+            }
+            None
+        }
+
+        if let Some(emit_idx) = self.emit_idx.as_mut()
+            && let Some(safe_idx) = self.safe_idx
+            && let Some(quote) = try_emit(emit_idx, safe_idx, &mut self.buckets)
+        {
+            return Some(quote);
+        }
+
+        for quote in self.quote_iterator.by_ref() {
+            let current_time = quote.pkt_time;
+
+            let safe_idx = {
+                let safe_time = current_time - Timestamp::from_secs_and_nanos(3, 0);
+                safe_time.timestamp_centiseconds() as usize % BUCKET_LEN
+            };
+            self.safe_idx = Some(safe_idx);
+
+            let emit_idx = quote.accept_time.timestamp_centiseconds() as usize % BUCKET_LEN;
+            if self.emit_idx.is_none() {
+                self.emit_idx = Some(emit_idx);
+            }
+
+            self.buckets[emit_idx].vec.push(quote);
+
+            if let Some(emit_idx) = self.emit_idx.as_mut()
+                && let Some(safe_idx) = self.safe_idx
+                && let Some(quote) = try_emit(emit_idx, safe_idx, &mut self.buckets)
+            {
+                return Some(quote);
+            }
+        }
+
+        if self.last_idx.is_none()
+            && let Some(emit_idx) = self.emit_idx
+        {
+            self.last_idx = Some(match emit_idx {
+                0 => BUCKET_LEN - 1,
+                i => i - 1,
+            });
+        }
+
+        if let Some(emit_idx) = self.emit_idx.as_mut()
+            && let Some(last_idx) = self.last_idx
+        {
+            let mut next_idx = *emit_idx;
+            while next_idx != last_idx {
+                let bucket = self.buckets.get_mut(next_idx).unwrap();
+                if !bucket.vec.is_empty() {
+                    *emit_idx = next_idx;
+                    let quote = bucket.vec.remove(0);
+                    return Some(quote);
+                }
+                next_idx = (next_idx + 1) % BUCKET_LEN;
+            }
+        }
+
+        None
+    }
+}
+
 #[test]
 fn test_quote_parsing() {
     let mmap = crate::open_mmaped_file("../dataset/mdf-kospi200.20110216-0.pcap").unwrap();
     let pcap_iterator = PcapIterator::new(&mmap);
-    let quote_iterator = SortedQuoteIterator::new(pcap_iterator, 3000);
+    let quote_iterator = SortedQuoteIterator2::new(pcap_iterator, 3000);
 
     assert_eq!(quote_iterator.count(), 16004);
 }

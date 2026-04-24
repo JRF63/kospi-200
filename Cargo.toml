@@ -11,6 +11,5 @@ panic = "abort"
 
 [workspace.dependencies]
 kospi-parser = { path = "parser" }
-memmap2 = "0.9.10"
 clap = { version = "4.6.0", features = ["derive"] }
 criterion = "0.8.2"

@@ -32,6 +32,10 @@ impl Timestamp {
         Self(secs * NANOS_PER_SEC + nsecs)
     }
 
+    pub const fn timestamp_centiseconds(&self) -> i64 {
+        self.0 / NANOS_PER_CENT
+    }
+
     /// Convert `bytes` in the ASCII HHMMSSuu format to the number of nanoseconds after midnight
     pub fn hhmmssuu_to_midnight_delta(bytes: &[u8; 8]) -> Self {
         let [hour, min, sec, cent] = Timestamp::parse_hhmmssuu(bytes);

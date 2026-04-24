@@ -12,7 +12,7 @@ pub use self::{
     ethernet::EthernetPacket,
     ip::IpPacket,
     pcap::{PcapIterator, PcapPacket},
-    quote::{QuoteIterator, QuotePacket, SortedQuoteIterator},
+    quote::{QuoteIterator, QuotePacket, SortedQuoteIterator, SortedQuoteIterator2},
     time::Timestamp,
     udp::UdpPacket,
 };
