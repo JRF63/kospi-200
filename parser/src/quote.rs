@@ -281,8 +281,57 @@ impl<'a> Iterator for SortedQuoteIteratorHeap<'a> {
 // modulo calculations faster
 const BUCKET_LEN: usize = 512;
 
-// The array length 4 is arbitrary and should be tuned to the dataset
-type Bucket<'a> = SmallVec<[QuotePacket<'a>; 4]>;
+#[derive(Debug, Default, Clone)]
+struct Bucket<'a> {
+    // The array length 4 is arbitrary and should be tuned to the dataset
+    vec: SmallVec<[BucketedQuotePacket<'a>; 4]>,
+
+    // These two should all be the same for all quotes inside `vec` above
+    accept_time: Option<Timestamp>,
+    midnight_at_timezone: Option<Timestamp>,
+}
+
+// `accept_time` and `midnight_at_timezone` are stripped out. `seq_num` isn't necessary for stable
+// sorting
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct BucketedQuotePacket<'a> {
+    pkt_time: Timestamp,
+    data: &'a [u8; QUOTE_PACKET_SIZE],
+}
+
+impl<'a> Bucket<'a> {
+    fn remove(&mut self, index: usize) -> QuotePacket<'a> {
+        let BucketedQuotePacket { pkt_time, data } = self.vec.remove(index);
+
+        // SAFETY: `accept_time` and `midnight_at_timezone` are always initialized when pushing to
+        // `vec`
+        unsafe {
+            QuotePacket {
+                seq_num: 0,
+                pkt_time,
+                accept_time: self.accept_time.unwrap_unchecked(),
+                midnight_at_timezone: self.midnight_at_timezone.unwrap_unchecked(),
+                data,
+            }
+        }
+    }
+    fn push(&mut self, quote: QuotePacket<'a>) {
+        let QuotePacket {
+            seq_num: _,
+            pkt_time,
+            accept_time,
+            midnight_at_timezone,
+            data,
+        } = quote;
+        self.accept_time = Some(accept_time);
+        self.midnight_at_timezone = Some(midnight_at_timezone);
+
+        self.vec.push(BucketedQuotePacket { pkt_time, data });
+    }
+    fn is_empty(&self) -> bool {
+        self.vec.is_empty()
+    }
+}
 
 // Bucket sorting - O(N)
 pub struct SortedQuoteIteratorBuckets<'a> {
@@ -295,7 +344,7 @@ pub struct SortedQuoteIteratorBuckets<'a> {
 }
 
 impl<'a> SortedQuoteIteratorBuckets<'a> {
-    pub fn new(pcap_iterator: PcapIterator<'a>, _init_capacity: usize) -> Self {
+    pub fn new(pcap_iterator: PcapIterator<'a>) -> Self {
         Self {
             quote_iterator: QuoteIterator::new(pcap_iterator),
             buckets: vec![Default::default(); BUCKET_LEN].try_into().unwrap(),
@@ -453,17 +502,54 @@ fn test_quote_parsing() {
     let count_a = {
         let mmap = crate::open_mmaped_file(filename).unwrap();
         let pcap_iterator = PcapIterator::new(&mmap);
-        let quote_iterator = SortedQuoteIteratorHeap::new(pcap_iterator, 3000);
+        let quote_iterator = QuoteIterator::new(pcap_iterator);
         quote_iterator.count()
     };
 
     let count_b = {
         let mmap = crate::open_mmaped_file(filename).unwrap();
         let pcap_iterator = PcapIterator::new(&mmap);
-        let quote_iterator = SortedQuoteIteratorBuckets::new(pcap_iterator, 3000);
+        let quote_iterator = SortedQuoteIteratorHeap::new(pcap_iterator, 3000);
+        quote_iterator.count()
+    };
+
+    let count_c = {
+        let mmap = crate::open_mmaped_file(filename).unwrap();
+        let pcap_iterator = PcapIterator::new(&mmap);
+        let quote_iterator = SortedQuoteIteratorBuckets::new(pcap_iterator);
         quote_iterator.count()
     };
 
     assert_eq!(count_a, 16004);
     assert_eq!(count_b, 16004);
+    assert_eq!(count_c, 16004);
+}
+
+#[test]
+fn test_quote_sorting() {
+    let filename = "../dataset/mdf-kospi200.20110216-0.pcap";
+
+    let mmap = crate::open_mmaped_file(filename).unwrap();
+    let quote_iterator_a = {
+        let pcap_iterator = PcapIterator::new(&mmap);
+        SortedQuoteIteratorHeap::new(pcap_iterator, 3000)
+    };
+
+    let mmap = crate::open_mmaped_file(filename).unwrap();
+    let quote_iterator_b = {
+        let pcap_iterator = PcapIterator::new(&mmap);
+        SortedQuoteIteratorBuckets::new(pcap_iterator)
+    };
+
+    let mut accept_time_a = Timestamp::from_secs_and_nanos(0, 0);
+    let mut accept_time_b = Timestamp::from_secs_and_nanos(0, 0);
+
+    for (a, b) in quote_iterator_a.zip(quote_iterator_b) {
+        // Test if accept times are monotonically increasing
+        assert!(accept_time_a <= a.accept_time);
+        accept_time_a = a.accept_time;
+
+        assert!(accept_time_b <= b.accept_time);
+        accept_time_b = b.accept_time;
+    }
 }

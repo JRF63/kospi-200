@@ -19,6 +19,7 @@ const NETWORK_HEADERS: [u8; NETWORK_HEADERS_SIZE] = [
 
 const NANOS_PER_SEC: i64 = 1_000_000_000;
 const NANOS_PER_HOUR: i64 = 3600 * NANOS_PER_SEC;
+const NANOS_PER_CENT: i64 = NANOS_PER_SEC / 100;
 
 const PACKETS_PER_SEC: usize = 750;
 const NANOS_PER_PACKET: i64 = NANOS_PER_SEC / PACKETS_PER_SEC as i64;
@@ -79,13 +80,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut packet_payload = Vec::with_capacity(NETWORK_HEADERS_SIZE + QUOTE_PACKET_SIZE);
         packet_payload.extend_from_slice(&NETWORK_HEADERS);
 
-        let quote_data = gen_quote(counter, accept_time);
+        let rounded_accept_time = (accept_time / NANOS_PER_CENT) * NANOS_PER_CENT;
+        let quote_data = gen_quote(counter, rounded_accept_time);
         packet_payload.extend_from_slice(&quote_data);
 
         // Simulated packet time
         let packet_timestamp = {
-            let accept_timestamp =
-                Duration::from_nanos((accept_time + (START_TIME - Timestamp::TIMEZONE_KST)) as u64);
+            let rounded_accept_nanos =
+                ((rounded_accept_time + (START_TIME - Timestamp::TIMEZONE_KST)) / NANOS_PER_CENT)
+                    * NANOS_PER_CENT;
+            let accept_timestamp = Duration::from_nanos(rounded_accept_nanos as u64);
 
             let delay = {
                 let delay = Duration::from_secs_f64(exp.sample(&mut rng));
