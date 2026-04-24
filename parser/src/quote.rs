@@ -14,9 +14,32 @@ use std::iter::FusedIterator;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct QuotePacket<'a> {
-    // Used for "stable" sorting
-    pub seq_num: usize,
+    // Packet reception time (UTC)
+    pub pkt_time: Timestamp,
 
+    // Payload
+    pub data: &'a [u8; QUOTE_PACKET_SIZE],
+}
+
+impl<'a> QuotePacket<'a> {
+    pub fn new(pkt_time: Timestamp, data: &'a [u8]) -> Option<Self> {
+        if data.starts_with(b"B6034") {
+            Some(Self {
+                pkt_time,
+                data: data.as_array::<QUOTE_PACKET_SIZE>()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn into_quote(self) -> Quote<'a> {
+        self.into()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Quote<'a> {
     // Packet reception time (UTC)
     pub pkt_time: Timestamp,
 
@@ -31,52 +54,28 @@ pub struct QuotePacket<'a> {
     pub data: &'a [u8; QUOTE_PACKET_SIZE],
 }
 
-impl<'a> PartialOrd for QuotePacket<'a> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
+impl<'a> From<QuotePacket<'a>> for Quote<'a> {
+    fn from(value: QuotePacket<'a>) -> Self {
+        let QuotePacket { pkt_time, data } = value;
 
-impl<'a> Ord for QuotePacket<'a> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Reverse the comparison for min-heap
-        match other.accept_time.cmp(&self.accept_time) {
-            std::cmp::Ordering::Equal => {
-                // Tie-break with the `seq_num` to prevent unnecessary reordering by the
-                // `BinaryHeap`
-                other.seq_num.cmp(&self.seq_num)
-            }
-            order => order,
+        // Number of nanoseconds after midnight
+        let day_nanos = Timestamp::hhmmssuu_to_midnight_delta(data[206..214].as_array().unwrap());
+
+        // NOTE: This is somewhat slow but caching this yields negligible performance
+        let midnight_at_timezone = pkt_time.get_midnight_at_timezone(Timestamp::TIMEZONE_KST);
+
+        let accept_time = day_nanos + midnight_at_timezone;
+
+        Self {
+            pkt_time,
+            accept_time,
+            midnight_at_timezone,
+            data,
         }
     }
 }
 
-impl<'a> QuotePacket<'a> {
-    pub fn new(seq_num: usize, pkt_time: Timestamp, data: &'a [u8]) -> Option<Self> {
-        if data.starts_with(b"B6034") {
-            let data = data.as_array::<QUOTE_PACKET_SIZE>()?;
-
-            // Number of nanoseconds after midnight
-            let day_nanos = Timestamp::hhmmssuu_to_midnight_delta(data[206..214].as_array()?);
-
-            // TODO: `get_midnight_at_timezone` is somewhat slow so if all the packets are from the
-            // same day, it could be cached for better performance
-            let midnight_at_timezone = pkt_time.get_midnight_at_timezone(Timestamp::TIMEZONE_KST);
-
-            let accept_time = day_nanos + midnight_at_timezone;
-
-            Some(Self {
-                seq_num,
-                pkt_time,
-                accept_time,
-                midnight_at_timezone,
-                data,
-            })
-        } else {
-            None
-        }
-    }
-
+impl<'a> Quote<'a> {
     /// Format this quote packet as a fixed-width output line.
     ///
     /// The returned buffer contains the packet fields in text form, including a trailing newline.
@@ -131,7 +130,7 @@ impl<'a> QuotePacket<'a> {
 // fields as fixed-sized byte arrays.
 macro_rules! generate_getters {
     ($($name:ident, $start:expr, $end:expr);*) => {
-        impl<'a> QuotePacket<'a> {
+        impl<'a> Quote<'a> {
             $(
                 // Use fixed sized arrays for bounds check elision
                 fn $name(&'a self) -> &'a [u8; $end - $start] {
@@ -179,16 +178,12 @@ generate_getters! {
 }
 
 pub struct QuoteIterator<'a> {
-    seq_num: usize,
     pcap_iterator: PcapIterator<'a>,
 }
 
 impl<'a> QuoteIterator<'a> {
     pub fn new(pcap_iterator: PcapIterator<'a>) -> Self {
-        Self {
-            seq_num: 0,
-            pcap_iterator,
-        }
+        Self { pcap_iterator }
     }
 }
 
@@ -199,10 +194,7 @@ impl<'a> Iterator for QuoteIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         #[inline(always)]
-        fn try_map_to_quote<'b>(
-            pcap_packet: PcapPacket<'b>,
-            seq_num: usize,
-        ) -> Option<QuotePacket<'b>> {
+        fn try_map_to_quote<'b>(pcap_packet: PcapPacket<'b>) -> Option<QuotePacket<'b>> {
             let PcapPacket { pkt_time, data } = pcap_packet;
             let EthernetPacket { ether_type, data } = EthernetPacket::new(data)?;
             let IpPacket { protocol, data } = IpPacket::new(ether_type, data)?;
@@ -212,7 +204,7 @@ impl<'a> Iterator for QuoteIterator<'a> {
                 let UdpPacket { dst_port, data } = UdpPacket::new(data)?;
 
                 match dst_port {
-                    15515 | 15516 => QuotePacket::new(seq_num, pkt_time, data),
+                    15515 | 15516 => QuotePacket::new(pkt_time, data),
                     _ => None, // Reject packets not on ports 15515 and 15516
                 }
             } else {
@@ -221,11 +213,8 @@ impl<'a> Iterator for QuoteIterator<'a> {
         }
 
         for pcap_packet in self.pcap_iterator.by_ref() {
-            match try_map_to_quote(pcap_packet, self.seq_num) {
-                Some(quote) => {
-                    self.seq_num += 1;
-                    return Some(quote);
-                }
+            match try_map_to_quote(pcap_packet) {
+                Some(quote) => return Some(quote),
                 None => continue,
             }
         }

@@ -1,7 +1,6 @@
 use crate::{
-    QUOTE_PACKET_SIZE,
     pcap::PcapIterator,
-    quote::{QuoteIterator, QuotePacket},
+    quote::{Quote, QuoteIterator, QuotePacket},
     time::Timestamp,
 };
 use smallvec::SmallVec;
@@ -14,30 +13,21 @@ const BUCKET_LEN: usize = 512;
 #[derive(Debug, Default, Clone)]
 struct Bucket<'a> {
     // The array length 4 is arbitrary and should be tuned to the dataset
-    vec: SmallVec<[BucketedQuotePacket<'a>; 4]>,
+    vec: SmallVec<[QuotePacket<'a>; 4]>,
 
     // These two should all be the same for all quotes inside `vec` above
     accept_time: Option<Timestamp>,
     midnight_at_timezone: Option<Timestamp>,
 }
 
-// `accept_time` and `midnight_at_timezone` are stripped out. `seq_num` isn't necessary for stable
-// sorting
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct BucketedQuotePacket<'a> {
-    pkt_time: Timestamp,
-    data: &'a [u8; QUOTE_PACKET_SIZE],
-}
-
 impl<'a> Bucket<'a> {
-    fn remove(&mut self, index: usize) -> QuotePacket<'a> {
-        let BucketedQuotePacket { pkt_time, data } = self.vec.remove(index);
+    fn remove(&mut self, index: usize) -> Quote<'a> {
+        let QuotePacket { pkt_time, data } = self.vec.remove(index);
 
         // SAFETY: `accept_time` and `midnight_at_timezone` are always initialized when pushing to
         // `vec`
         unsafe {
-            QuotePacket {
-                seq_num: 0,
+            Quote {
                 pkt_time,
                 accept_time: self.accept_time.unwrap_unchecked(),
                 midnight_at_timezone: self.midnight_at_timezone.unwrap_unchecked(),
@@ -45,19 +35,18 @@ impl<'a> Bucket<'a> {
             }
         }
     }
-    fn push(&mut self, quote: QuotePacket<'a>) {
-        let QuotePacket {
-            seq_num: _,
-            pkt_time,
-            accept_time,
-            midnight_at_timezone,
-            data,
-        } = quote;
+    fn push(
+        &mut self,
+        quote: QuotePacket<'a>,
+        accept_time: Timestamp,
+        midnight_at_timezone: Timestamp,
+    ) {
         self.accept_time = Some(accept_time);
         self.midnight_at_timezone = Some(midnight_at_timezone);
 
-        self.vec.push(BucketedQuotePacket { pkt_time, data });
+        self.vec.push(quote);
     }
+
     fn is_empty(&self) -> bool {
         self.vec.is_empty()
     }
@@ -90,7 +79,7 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
         emit_idx: &mut usize,
         safe_idx: usize,
         buckets: &mut Box<[Bucket<'b>; BUCKET_LEN]>,
-    ) -> Option<QuotePacket<'b>> {
+    ) -> Option<Quote<'b>> {
         let mut next_idx = *emit_idx;
         loop {
             let bucket = buckets.get_mut(next_idx).unwrap();
@@ -115,7 +104,7 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
         emit_idx: &mut Option<usize>,
         safe_idx: Option<usize>,
         buckets: &mut Box<[Bucket<'b>; BUCKET_LEN]>,
-    ) -> Option<QuotePacket<'b>> {
+    ) -> Option<Quote<'b>> {
         if let Some(emit_idx) = emit_idx.as_mut()
             && let Some(safe_idx) = safe_idx
         {
@@ -139,7 +128,7 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
 impl<'a> FusedIterator for SortedQuoteIteratorBuckets<'a> {}
 
 impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
-    type Item = QuotePacket<'a>;
+    type Item = Quote<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // Greedily try to emit a packet. This prevents the `SmallVec`s from allocating by keeping
@@ -153,19 +142,24 @@ impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
         const THREE_SECONDS: Timestamp = Timestamp::from_secs_and_nanos(3, 0);
 
         for quote in self.quote_iterator.by_ref() {
-            let current_time = quote.pkt_time;
+            // TODO: Try leaving calcs in centiseconds
+            let Quote {
+                pkt_time,
+                accept_time,
+                midnight_at_timezone,
+                data,
+            } = quote.into_quote();
 
             let safe_idx = {
-                let safe_time = current_time - THREE_SECONDS;
+                let safe_time = pkt_time - THREE_SECONDS;
                 safe_time.timestamp_centiseconds() as usize % BUCKET_LEN
             };
             self.safe_idx = Some(safe_idx);
 
-            let idx = quote.accept_time.timestamp_centiseconds() as usize % BUCKET_LEN;
+            let idx = accept_time.timestamp_centiseconds() as usize % BUCKET_LEN;
 
             // Initialize the index of the bucket that will be emitted first
             if self.emit_idx.is_none() {
-                let accept_time = quote.accept_time;
                 let earliest_accept_time = match self.earliest_accept_time.as_mut() {
                     Some(earliest_accept_time) => {
                         if accept_time < *earliest_accept_time {
@@ -180,14 +174,18 @@ impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
                     }
                 };
 
-                if current_time - earliest_accept_time >= THREE_SECONDS {
+                if pkt_time - earliest_accept_time >= THREE_SECONDS {
                     let emit_idx =
                         earliest_accept_time.timestamp_centiseconds() as usize % BUCKET_LEN;
                     self.emit_idx = Some(emit_idx);
                 }
             }
 
-            self.buckets[idx].push(quote);
+            self.buckets[idx].push(
+                QuotePacket { pkt_time, data },
+                accept_time,
+                midnight_at_timezone,
+            );
 
             if let Some(quote) =
                 Self::try_emit_elapsed_packet(&mut self.emit_idx, self.safe_idx, &mut self.buckets)
@@ -196,7 +194,7 @@ impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
             }
         }
 
-        // Drain the buckets
+        // Drain the rest of the packets from the buckets
         if let Some(emit_idx) = self.emit_idx.as_mut() {
             match self.last_idx {
                 Some(last_idx) => {

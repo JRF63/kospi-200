@@ -26,7 +26,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
             let pcap_iterator = PcapIterator::new(&mmap);
             let quote_iterator = QuoteIterator::new(pcap_iterator);
-            let lines = quote_iterator.map(|x| x.to_line_bytes());
+            let lines = quote_iterator.map(|x| x.into_quote().to_line_bytes());
             lines.count()
         })
     });

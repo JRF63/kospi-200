@@ -38,7 +38,7 @@ fn main() -> std::io::Result<()> {
 
         // Prints the quotes in the order they appear on the file
         for quote in quote_iterator {
-            let line = quote.to_line_bytes();
+            let line = quote.into_quote().to_line_bytes();
             writer.write_all(&line)?;
         }
     }
