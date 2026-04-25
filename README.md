@@ -1,4 +1,12 @@
-### Output
+## Description
+
+This repository contains a Rust parser for the KOSPI 200 market data feed. It manually parses the input PCAP file, (optionally) sorts packets by the quote accept time, and prints a formatted view of the market data.
+
+mmap via the `memmap2` crate is used to handle files larger than available system memory. The sorting was initially done with a `BinaryHeap` but it's now using a faster [bucket sort](parser/src/quote/bucket.rs) version.
+
+Multithreading was not attempted. The difference from parsing the PCAP, which has to be sequential [^1], to the formatting of the quote is approximately 6 nanoseconds per packet [^2]. Synchronization of the threads is likely to result in worse performance.
+
+### Example output
 ```text
 $ cargo run --release -- -r dataset/mdf-kospi200.20110216-0.pcap
 09:00:00.006437 08:59:59.970000 KR4201F32705           0@0           0@0           0@0           0@0           0@0           0@0           0@0           0@0           0@0           0@0
@@ -23,3 +31,15 @@ $ cargo run --release -- -r dataset/mdf-kospi200.20110216-0.pcap
 09:00:00.538991 09:00:00.000000 KR4201F52604        0@1010        0@1015        9@1020        0@1025        9@1030        8@1395        0@1400        8@1405        0@1410        0@1415
 ...
 ```
+
+## Code layout
+
+The bulk of the code is at [parser](parser) with the [printer](printer) being just a thin wrapper to the former. A dataset [generator](generator) is included for benchmarking:
+
+```text
+$ cargo run -p kospi-generator -- 10
+```
+The PCAP files are kept over at [dataset](dataset).
+
+[^1]: The `cap_len` dictates the size of the PCAP packet and it needs to be read from the header for each packet.
+[^2]: From the benchmarks `cargo bench -p kospi-parser`, the difference between "quote iterator" and "sorted quote iterator (buckets)" is (372.53 µs - 275.08 µs) / 16000 packets ≈ 6 ns
