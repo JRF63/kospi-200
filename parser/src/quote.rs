@@ -80,47 +80,71 @@ impl<'a> Quote<'a> {
     ///
     /// The returned buffer contains the fields in text form, including a trailing newline.
     #[inline]
-    pub fn to_line_bytes(&'a self) -> [u8; 171] {
-        // 170 bytes on the stack shouldn't be a problem
+    pub fn to_line_bytes(&'a self) -> [u8; 185] {
+        // 185 bytes on the stack shouldn't be a problem
         let mut line_buf = [b' ';
-            8 + 1 // pkt-time
-            + 8 + 1 // accept-time
+            15 + 1 // pkt-time
+            + 15 + 1 // accept-time
             + 12 + 1 // issue-code
             + 10 * (7 + 1 + 5 + 1) // qty(7) + '@'(1) + price(5) + ' '|'\n'(1)
         ];
 
-        line_buf[0..8].copy_from_slice(&self.pkt_time.format_hhmmssuu(self.midnight_at_timezone));
-        line_buf[9..17].copy_from_slice(self.accept_time());
-        line_buf[18..30].copy_from_slice(self.issue_code());
+        let midnight = self.midnight_at_timezone;
+        line_buf[0..15].copy_from_slice(&self.pkt_time.as_printable_time_string(midnight));
+        line_buf[16..31].copy_from_slice(&self.accept_time.as_printable_time_string(midnight));
+
+        line_buf[32..44].copy_from_slice(self.issue_code());
+
+        fn write_quantity_price_pair(out: &mut [u8; 13], quantity: &[u8; 7], price: &[u8; 5]) {
+            // For removing leading zeros
+            fn count_trimmable_ascii_zeros<const N: usize>(array: &[u8; N]) -> usize {
+                array[..N - 1].iter().take_while(|&&b| b == b'0').count()
+            }
+
+            let lz_quantity = count_trimmable_ascii_zeros(quantity);
+            let lz_price = count_trimmable_ascii_zeros(price);
+            let start = lz_quantity + lz_price;
+            let mid = lz_price + quantity.len();
+
+            // SAFETY: Number of leading zeros <= (length of array - 1)
+            let quantity = unsafe { quantity.get_unchecked(lz_quantity..) };
+            let price = unsafe { price.get_unchecked(lz_price..) };
+
+            // SAFETY: The indices should all be within 0..13
+            unsafe {
+                out.get_unchecked_mut(start..mid).copy_from_slice(quantity);
+                *out.get_unchecked_mut(mid) = b'@';
+                out.get_unchecked_mut((mid + 1)..).copy_from_slice(price);
+            }
+        }
 
         macro_rules! write_quantity_and_price {
             ($($start:expr, $quantity:ident, $price:ident);*) => {
                 $(
-                    // Quantity is 7 bytes
-                    line_buf[$start..($start + 7)].copy_from_slice(self.$quantity());
-                    // Add the separator
-                    line_buf[$start + 7] = b'@';
-                    // Prices is 5 bytes
-                    line_buf[($start + 8)..($start + 13)].copy_from_slice(self.$price());
+                    write_quantity_price_pair(
+                        line_buf[$start..($start + 13)].as_mut_array().unwrap(),
+                        self.$quantity(),
+                        self.$price(),
+                    );
                 )*
             }
         }
 
         write_quantity_and_price!(
-            31, bid_5_quantity, bid_5_price;
-            45, bid_4_quantity, bid_4_price;
-            59, bid_3_quantity, bid_3_price;
-            73, bid_2_quantity, bid_2_price;
-            87, bid_1_quantity, bid_1_price;
+            45, bid_5_quantity, bid_5_price;
+            59, bid_4_quantity, bid_4_price;
+            73, bid_3_quantity, bid_3_price;
+            87, bid_2_quantity, bid_2_price;
+            101, bid_1_quantity, bid_1_price;
 
-            101, ask_1_quantity, ask_1_price;
-            115, ask_2_quantity, ask_2_price;
-            129, ask_3_quantity, ask_3_price;
-            143, ask_4_quantity, ask_4_price;
-            157, ask_5_quantity, ask_5_price
+            115, ask_1_quantity, ask_1_price;
+            129, ask_2_quantity, ask_2_price;
+            143, ask_3_quantity, ask_3_price;
+            157, ask_4_quantity, ask_4_price;
+            171, ask_5_quantity, ask_5_price
         );
 
-        line_buf[170] = b'\n';
+        line_buf[184] = b'\n';
 
         line_buf
     }
@@ -189,7 +213,6 @@ macro_rules! generate_getters {
 // | 214..215 | 1    | End of Message (0xF)               |
 // +----------+------+------------------------------------+
 generate_getters! {
-    accept_time, 206, 214;
     issue_code, 5, 17;
 
     bid_1_price, 29, 34;

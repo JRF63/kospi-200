@@ -154,7 +154,7 @@ fn gen_quote(counter: usize, accept_time: i64) -> [u8; QUOTE_PACKET_SIZE] {
     // Write accept time
     {
         let day_nanos = Timestamp::from_secs_and_nanos(0, accept_time);
-        let hhmmssuu = day_nanos.format_hhmmssuu(Timestamp::from_secs_and_nanos(0, 0));
+        let hhmmssuu = day_nanos.as_hhmmssuu_string(Timestamp::from_secs_and_nanos(0, 0));
         out[206..214].copy_from_slice(&hhmmssuu);
     }
 

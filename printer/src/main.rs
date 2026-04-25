@@ -7,7 +7,7 @@ const STDOUT_BUF_SIZE: usize = 128_000; // Use a large value to minimize syscall
 
 #[derive(Parser)]
 struct Args {
-    /// Whether to reorder the messages according to the quote accept time
+    /// Reorder the messages according to the quote accept time
     #[arg(short)]
     reorder: bool,
 

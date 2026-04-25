@@ -72,14 +72,7 @@ impl Timestamp {
     }
 
     /// Convert into the HHMMSSuu format given the midnight timestamp
-    pub fn format_hhmmssuu(&self, midnight: Timestamp) -> [u8; 8] {
-        #[inline(always)]
-        fn write_digits_fast<const OFFSET: usize>(buf: &mut [u8; 8], val: u8) {
-            let (tens, ones) = (val / 10, val % 10);
-            buf[OFFSET] = tens + b'0';
-            buf[OFFSET + 1] = ones + b'0';
-        }
-
+    pub fn as_hhmmssuu_string(&self, midnight: Timestamp) -> [u8; 8] {
         let mut out = [0u8; 8];
 
         let day_nanos = self.0 - midnight.0;
@@ -89,13 +82,52 @@ impl Timestamp {
         let sec = (day_nanos % NANOS_PER_MIN) / NANOS_PER_SEC;
         let cent = (day_nanos % NANOS_PER_SEC) / NANOS_PER_CENT;
 
-        write_digits_fast::<0>(&mut out, hour as u8);
-        write_digits_fast::<2>(&mut out, min as u8);
-        write_digits_fast::<4>(&mut out, sec as u8);
-        write_digits_fast::<6>(&mut out, cent as u8);
+        write_digits_fast::<0, 8>(&mut out, hour as u8);
+        write_digits_fast::<2, 8>(&mut out, min as u8);
+        write_digits_fast::<4, 8>(&mut out, sec as u8);
+        write_digits_fast::<6, 8>(&mut out, cent as u8);
 
         out
     }
+
+    pub fn as_printable_time_string(&self, midnight: Timestamp) -> [u8; 15] {
+        let mut out = [0, 0, b':', 0, 0, b':', 0, 0, b'.', 0, 0, 0, 0, 0, 0];
+
+        let day_nanos = self.0 - midnight.0;
+
+        let hour = day_nanos / NANOS_PER_HOUR;
+        let min = (day_nanos % NANOS_PER_HOUR) / NANOS_PER_MIN;
+        let sec = (day_nanos % NANOS_PER_MIN) / NANOS_PER_SEC;
+        let mut val = (day_nanos % NANOS_PER_SEC) / 1000;
+
+        write_digits_fast::<0, 15>(&mut out, hour as u8);
+        write_digits_fast::<3, 15>(&mut out, min as u8);
+        write_digits_fast::<6, 15>(&mut out, sec as u8);
+
+        out[14] = (val % 10) as u8 + b'0';
+        val /= 10;
+        out[13] = (val % 10) as u8 + b'0';
+        val /= 10;
+        out[12] = (val % 10) as u8 + b'0';
+        val /= 10;
+        out[11] = (val % 10) as u8 + b'0';
+        val /= 10;
+        out[10] = (val % 10) as u8 + b'0';
+        val /= 10;
+        out[9] = (val % 10) as u8 + b'0';
+
+        out
+    }
+}
+
+#[inline(always)]
+fn write_digits_fast<const OFFSET: usize, const BUF_SIZE: usize>(
+    buf: &mut [u8; BUF_SIZE],
+    val: u8,
+) {
+    let (tens, ones) = (val / 10, val % 10);
+    buf[OFFSET] = tens + b'0';
+    buf[OFFSET + 1] = ones + b'0';
 }
 
 #[test]
