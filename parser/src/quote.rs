@@ -61,7 +61,7 @@ impl<'a> From<QuotePacket<'a>> for Quote<'a> {
         // Number of nanoseconds after midnight
         let day_nanos = Timestamp::hhmmssuu_to_midnight_delta(data[206..214].as_array().unwrap());
 
-        // NOTE: This is somewhat slow but caching this yields negligible performance
+        // NOTE: This is somewhat slow but caching it yields negligible performance
         let midnight_at_timezone = pkt_time.get_midnight_at_timezone(Timestamp::TIMEZONE_KST);
 
         let accept_time = day_nanos + midnight_at_timezone;
@@ -76,9 +76,9 @@ impl<'a> From<QuotePacket<'a>> for Quote<'a> {
 }
 
 impl<'a> Quote<'a> {
-    /// Format this quote packet as a fixed-width output line.
+    /// Format this quote as a fixed-width output line.
     ///
-    /// The returned buffer contains the packet fields in text form, including a trailing newline.
+    /// The returned buffer contains the fields in text form, including a trailing newline.
     #[inline]
     pub fn to_line_bytes(&'a self) -> [u8; 171] {
         // 170 bytes on the stack shouldn't be a problem
@@ -142,6 +142,52 @@ macro_rules! generate_getters {
     }
 }
 
+// +----------+------+------------------------------------+
+// | Indices  | Size | Field                              |
+// +----------+------+------------------------------------+
+// | 0..2     | 2    | Data Type (B6)                     |
+// | 2..4     | 2    | Information Type (03)              |
+// | 4..5     | 1    | Market Type (4)                    |
+// | 5..17    | 12   | Issue code                         |
+// | 17..20   | 3    | Issue seq.-no.                     |
+// | 20..22   | 2    | Market Status Type                 |
+// | 22..29   | 7    | Total bid quote volume             |
+// | 29..34   | 5    | Best bid price(1st) (ASCII)        |
+// | 34..41   | 7    | Best bid quantity(1st) (ASCII)     |
+// | 41..46   | 5    | Best bid price(2nd)                |
+// | 46..53   | 7    | Best bid quantity(2nd)             |
+// | 53..58   | 5    | Best bid price(3rd)                |
+// | 58..65   | 7    | Best bid quantity(3rd)             |
+// | 65..70   | 5    | Best bid price(4th)                |
+// | 70..77   | 7    | Best bid quantity(4th)             |
+// | 77..82   | 5    | Best bid price(5th)                |
+// | 82..89   | 7    | Best bid quantity(5th)             |
+// | 89..96   | 7    | Total ask quote volume             |
+// | 96..101  | 5    | Best ask price(1st)                |
+// | 101..108 | 7    | Best ask quantity(1st)             |
+// | 108..113 | 5    | Best ask price(2nd)                |
+// | 113..120 | 7    | Best ask quantity(2nd)             |
+// | 120..125 | 5    | Best ask price(3rd)                |
+// | 125..132 | 7    | Best ask quantity(3rd)             |
+// | 132..137 | 5    | Best ask price(4th)                |
+// | 137..144 | 7    | Best ask quantity(4th)             |
+// | 144..149 | 5    | Best ask price(5th)                |
+// | 149..156 | 7    | Best ask quantity(5th)             |
+// | 156..161 | 5    | No. of best bid valid quote(total) |
+// | 161..165 | 4    | No. of best bid quote(1st)         |
+// | 165..169 | 4    | No. of best bid quote(2nd)         |
+// | 169..173 | 4    | No. of best bid quote(3rd)         |
+// | 173..177 | 4    | No. of best bid quote(4th)         |
+// | 177..181 | 4    | No. of best bid quote(5th)         |
+// | 181..186 | 5    | No. of best ask valid quote(total) |
+// | 186..190 | 4    | No. of best ask quote(1st)         |
+// | 190..194 | 4    | No. of best ask quote(2nd)         |
+// | 194..198 | 4    | No. of best ask quote(3rd)         |
+// | 198..202 | 4    | No. of best ask quote(4th)         |
+// | 202..206 | 4    | No. of best ask quote(5th)         |
+// | 206..214 | 8    | Quote accept time (HHMMSSuu)       |
+// | 214..215 | 1    | End of Message (0xF)               |
+// +----------+------+------------------------------------+
 generate_getters! {
     accept_time, 206, 214;
     issue_code, 5, 17;

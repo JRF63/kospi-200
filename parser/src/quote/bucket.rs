@@ -8,31 +8,48 @@ use std::iter::FusedIterator;
 
 // Need at least 300 (3 seconds + centisecond resolution) but use the nearest power of two to make
 // modulo calculations faster
-const BUCKET_LEN: usize = 512;
+const NUM_BUCKETS: usize = 512;
 
-#[derive(Debug, Default, Clone)]
+// Average number of packets per bucket. Try to set this as high as possible while still fitting all
+// the buckets within the L1 cache
+const BUCKET_SIZE: usize = 4;
+
+// The estimate of the worst case for the number of packets that will be put in a single bucket
+const BUCKET_INIT_CAPACITY: usize = 32;
+
+#[derive(Debug, Clone)]
 struct Bucket<'a> {
-    // The array length 4 is arbitrary and should be tuned to the dataset
-    vec: SmallVec<[QuotePacket<'a>; 4]>,
+    vec: SmallVec<[QuotePacket<'a>; BUCKET_SIZE]>,
 
     // These two should all be the same for all quotes inside `vec` above
-    accept_time: Option<Timestamp>,
-    midnight_at_timezone: Option<Timestamp>,
+    accept_time: Timestamp,
+    midnight_at_timezone: Timestamp,
+}
+
+#[test]
+fn test_bucket_mem_size() {
+    // Should fit inside L1 cache
+    assert!(std::mem::size_of::<Bucket<'_>>() * NUM_BUCKETS < 64_000);
 }
 
 impl<'a> Bucket<'a> {
+    fn new_empty_bucket() -> Self {
+        const EPOCH: Timestamp = Timestamp::from_secs_and_nanos(0, 0);
+        Self {
+            vec: SmallVec::with_capacity(BUCKET_INIT_CAPACITY),
+            accept_time: EPOCH,
+            midnight_at_timezone: EPOCH,
+        }
+    }
+
     fn remove(&mut self, index: usize) -> Quote<'a> {
         let QuotePacket { pkt_time, data } = self.vec.remove(index);
 
-        // SAFETY: `accept_time` and `midnight_at_timezone` are always initialized when pushing to
-        // `vec`
-        unsafe {
-            Quote {
-                pkt_time,
-                accept_time: self.accept_time.unwrap_unchecked(),
-                midnight_at_timezone: self.midnight_at_timezone.unwrap_unchecked(),
-                data,
-            }
+        Quote {
+            pkt_time,
+            accept_time: self.accept_time,
+            midnight_at_timezone: self.midnight_at_timezone,
+            data,
         }
     }
     fn push(
@@ -41,8 +58,8 @@ impl<'a> Bucket<'a> {
         accept_time: Timestamp,
         midnight_at_timezone: Timestamp,
     ) {
-        self.accept_time = Some(accept_time);
-        self.midnight_at_timezone = Some(midnight_at_timezone);
+        self.accept_time = accept_time;
+        self.midnight_at_timezone = midnight_at_timezone;
 
         self.vec.push(quote);
     }
@@ -55,7 +72,7 @@ impl<'a> Bucket<'a> {
 // Bucket sorting - O(N)
 pub struct SortedQuoteIteratorBuckets<'a> {
     quote_iterator: QuoteIterator<'a>,
-    buckets: Box<[Bucket<'a>; BUCKET_LEN]>,
+    buckets: Box<[Bucket<'a>; NUM_BUCKETS]>,
     earliest_accept_time: Option<Timestamp>,
     emit_idx: Option<usize>,
     safe_idx: Option<usize>,
@@ -66,7 +83,9 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
     pub fn new(pcap_iterator: PcapIterator<'a>) -> Self {
         Self {
             quote_iterator: QuoteIterator::new(pcap_iterator),
-            buckets: vec![Default::default(); BUCKET_LEN].try_into().unwrap(),
+            buckets: vec![Bucket::new_empty_bucket(); NUM_BUCKETS]
+                .try_into()
+                .unwrap(),
             earliest_accept_time: None,
             emit_idx: None,
             safe_idx: None,
@@ -78,7 +97,7 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
     fn try_emit_packet<'b>(
         emit_idx: &mut usize,
         safe_idx: usize,
-        buckets: &mut Box<[Bucket<'b>; BUCKET_LEN]>,
+        buckets: &mut Box<[Bucket<'b>; NUM_BUCKETS]>,
     ) -> Option<Quote<'b>> {
         let mut next_idx = *emit_idx;
         loop {
@@ -94,7 +113,7 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
             if next_idx == safe_idx {
                 break;
             }
-            next_idx = (next_idx + 1) % BUCKET_LEN;
+            next_idx = (next_idx + 1) % NUM_BUCKETS;
         }
         None
     }
@@ -103,17 +122,17 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
     fn try_emit_elapsed_packet<'b>(
         emit_idx: &mut Option<usize>,
         safe_idx: Option<usize>,
-        buckets: &mut Box<[Bucket<'b>; BUCKET_LEN]>,
+        buckets: &mut Box<[Bucket<'b>; NUM_BUCKETS]>,
     ) -> Option<Quote<'b>> {
         if let Some(emit_idx) = emit_idx.as_mut()
             && let Some(safe_idx) = safe_idx
         {
             // Check if `safe_idx` >= `emit_idx` using the half-range rule
             let gt_or_eq = {
-                let diff = safe_idx.wrapping_sub(*emit_idx) % BUCKET_LEN;
+                let diff = safe_idx.wrapping_sub(*emit_idx) % NUM_BUCKETS;
 
                 // diff >= 0 && diff <= mid
-                (0..=(BUCKET_LEN / 2)).contains(&diff)
+                (0..=(NUM_BUCKETS / 2)).contains(&diff)
             };
 
             if gt_or_eq && let Some(quote) = Self::try_emit_packet(emit_idx, safe_idx, buckets) {
@@ -152,11 +171,11 @@ impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
 
             let safe_idx = {
                 let safe_time = pkt_time - THREE_SECONDS;
-                safe_time.timestamp_centiseconds() as usize % BUCKET_LEN
+                safe_time.timestamp_centiseconds() as usize % NUM_BUCKETS
             };
             self.safe_idx = Some(safe_idx);
 
-            let idx = accept_time.timestamp_centiseconds() as usize % BUCKET_LEN;
+            let idx = accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
 
             // Initialize the index of the bucket that will be emitted first
             if self.emit_idx.is_none() {
@@ -176,7 +195,7 @@ impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
 
                 if pkt_time - earliest_accept_time >= THREE_SECONDS {
                     let emit_idx =
-                        earliest_accept_time.timestamp_centiseconds() as usize % BUCKET_LEN;
+                        earliest_accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
                     self.emit_idx = Some(emit_idx);
                 }
             }
@@ -206,7 +225,7 @@ impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
                 }
                 None => {
                     let last_idx = match *emit_idx {
-                        0 => BUCKET_LEN - 1,
+                        0 => NUM_BUCKETS - 1,
                         i => i - 1,
                     };
                     self.last_idx = Some(last_idx);
