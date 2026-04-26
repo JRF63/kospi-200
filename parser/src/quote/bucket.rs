@@ -3,23 +3,18 @@ use crate::{
     quote::{Quote, QuoteIterator, QuotePacket},
     time::Timestamp,
 };
-use smallvec::SmallVec;
-use std::iter::FusedIterator;
+use std::{collections::VecDeque, iter::FusedIterator};
 
 // Need at least 300 (3 seconds + centisecond resolution) but use the nearest power of two to make
 // modulo calculations faster
 const NUM_BUCKETS: usize = 512;
-
-// Average number of packets per bucket. Try to set this as high as possible while still fitting all
-// the buckets within the L1 cache
-const BUCKET_SIZE: usize = 4;
 
 // The estimate of the worst case for the number of packets that will be put in a single bucket
 const BUCKET_INIT_CAPACITY: usize = 32;
 
 #[derive(Debug, Clone)]
 struct Bucket<'a> {
-    vec: SmallVec<[QuotePacket<'a>; BUCKET_SIZE]>,
+    deque: VecDeque<QuotePacket<'a>>,
 
     // These two should all be the same for all quotes inside `vec` above
     accept_time: Timestamp,
@@ -36,22 +31,24 @@ impl<'a> Bucket<'a> {
     fn new_empty_bucket() -> Self {
         const EPOCH: Timestamp = Timestamp::from_secs_and_nanos(0, 0);
         Self {
-            vec: SmallVec::with_capacity(BUCKET_INIT_CAPACITY),
+            deque: VecDeque::with_capacity(BUCKET_INIT_CAPACITY),
             accept_time: EPOCH,
             midnight_at_timezone: EPOCH,
         }
     }
 
-    fn remove(&mut self, index: usize) -> Quote<'a> {
-        let QuotePacket { pkt_time, data } = self.vec.remove(index);
-
-        Quote {
-            pkt_time,
-            accept_time: self.accept_time,
-            midnight_at_timezone: self.midnight_at_timezone,
-            data,
-        }
+    fn pop(&mut self) -> Option<Quote<'a>> {
+        self.deque.pop_back().map(|p| {
+            let QuotePacket { pkt_time, data } = p;
+            Quote {
+                pkt_time,
+                accept_time: self.accept_time,
+                midnight_at_timezone: self.midnight_at_timezone,
+                data,
+            }
+        })
     }
+
     fn push(
         &mut self,
         quote: QuotePacket<'a>,
@@ -61,11 +58,8 @@ impl<'a> Bucket<'a> {
         self.accept_time = accept_time;
         self.midnight_at_timezone = midnight_at_timezone;
 
-        self.vec.push(quote);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.vec.is_empty()
+        // Insert to the front to maintain a stable sort
+        self.deque.push_front(quote);
     }
 }
 
@@ -109,14 +103,11 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
             // `0..NUM_BUCKETS` when incremented
             let bucket = unsafe { buckets.get_unchecked_mut(next_idx) };
 
-            if !bucket.is_empty() {
+            if let Some(quote) = bucket.pop() {
                 *emit_idx = next_idx;
-
-                // This is O(N) so must keep the size of the buckets small
-                let quote = bucket.remove(0);
-
                 return Some(quote);
             }
+
             if next_idx == safe_idx {
                 break;
             }
