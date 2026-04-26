@@ -1,0 +1,25 @@
+name: Tests (Linux)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "linux-workspace-ci"
+
+      - name: Check Workspace
+        run: cargo check --workspace
+
+      - name: Run tests
+        run: cargo test --workspace --verbose
