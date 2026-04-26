@@ -73,7 +73,10 @@ impl<'a> Bucket<'a> {
 pub struct SortedQuoteIteratorBuckets<'a> {
     quote_iterator: QuoteIterator<'a>,
     buckets: Box<[Bucket<'a>; NUM_BUCKETS]>,
-    earliest_accept_time: Option<Timestamp>,
+    earliest_accept_time: Timestamp,
+
+    // Tried to use a `usize` for these indices with `NUM_BUCKETS` as a sentinel but that resulted
+    // in 2% worse performance
     emit_idx: Option<usize>,
     safe_idx: Option<usize>,
     last_idx: Option<usize>,
@@ -83,10 +86,11 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
     pub fn new(pcap_iterator: PcapIterator<'a>) -> Self {
         Self {
             quote_iterator: QuoteIterator::new(pcap_iterator),
-            buckets: vec![Bucket::new_empty_bucket(); NUM_BUCKETS]
-                .try_into()
-                .unwrap(),
-            earliest_accept_time: None,
+
+            // This might create a temporary value on the stack
+            buckets: Box::new(std::array::from_fn(|_| Bucket::new_empty_bucket())),
+
+            earliest_accept_time: Timestamp::from_secs_and_nanos(0, i64::MAX),
             emit_idx: None,
             safe_idx: None,
             last_idx: None,
@@ -97,11 +101,14 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
     fn try_emit_packet<'b>(
         emit_idx: &mut usize,
         safe_idx: usize,
-        buckets: &mut Box<[Bucket<'b>; NUM_BUCKETS]>,
+        buckets: &mut [Bucket<'b>; NUM_BUCKETS],
     ) -> Option<Quote<'b>> {
         let mut next_idx = *emit_idx;
         loop {
-            let bucket = buckets.get_mut(next_idx).unwrap();
+            // SAFETY: `emit_idx` should be < `NUM_BUCKETS`, `next_idx` is also clamped to
+            // `0..NUM_BUCKETS` when incremented
+            let bucket = unsafe { buckets.get_unchecked_mut(next_idx) };
+
             if !bucket.is_empty() {
                 *emit_idx = next_idx;
 
@@ -122,7 +129,7 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
     fn try_emit_elapsed_packet<'b>(
         emit_idx: &mut Option<usize>,
         safe_idx: Option<usize>,
-        buckets: &mut Box<[Bucket<'b>; NUM_BUCKETS]>,
+        buckets: &mut [Bucket<'b>; NUM_BUCKETS],
     ) -> Option<Quote<'b>> {
         if let Some(emit_idx) = emit_idx.as_mut()
             && let Some(safe_idx) = safe_idx
@@ -179,23 +186,13 @@ impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
 
             // Initialize the index of the bucket that will be emitted first
             if self.emit_idx.is_none() {
-                let earliest_accept_time = match self.earliest_accept_time.as_mut() {
-                    Some(earliest_accept_time) => {
-                        if accept_time < *earliest_accept_time {
-                            *earliest_accept_time = accept_time;
-                        }
-                        *earliest_accept_time
-                    }
-                    None => {
-                        let earliest_accept_time = accept_time;
-                        self.earliest_accept_time = Some(earliest_accept_time);
-                        earliest_accept_time
-                    }
-                };
+                if accept_time < self.earliest_accept_time {
+                    self.earliest_accept_time = accept_time;
+                }
 
-                if pkt_time - earliest_accept_time >= THREE_SECONDS {
+                if pkt_time - self.earliest_accept_time >= THREE_SECONDS {
                     let emit_idx =
-                        earliest_accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
+                        self.earliest_accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
                     self.emit_idx = Some(emit_idx);
                 }
             }
