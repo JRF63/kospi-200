@@ -19,8 +19,6 @@ fn criterion_benchmark(c: &mut Criterion) {
             iterator.count()
         })
     });
-    // The extra work compared to the above is in the single digit nanosecond range. Probably not
-    // worth parallelizing.
     c.bench_function("quote iterator", |b| {
         b.iter(|| {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
@@ -40,6 +38,8 @@ fn criterion_benchmark(c: &mut Criterion) {
             lines.count()
         })
     });
+    // The extra work compared to "PCAP iterator" is in the single digit nanosecond range. Probably
+    // not worth parallelizing.
     c.bench_function("sorted quote iterator (buckets)", |b| {
         b.iter(|| {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();

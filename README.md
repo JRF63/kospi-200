@@ -4,9 +4,14 @@ This repository contains a Rust parser for the KOSPI 200 market data feed. It ma
 
 mmap via the `memmap2` crate is used to handle files larger than available system memory. The sorting was initially done with a `BinaryHeap` but it's now using a faster [bucket sort](parser/src/quote/bucket.rs) version.
 
-Multithreading was not attempted. The difference from parsing the PCAP, which has to be sequential [^1], to the formatting of the quote is approximately 6 nanoseconds per packet [^2]. Synchronization of the threads is likely to result in worse performance.
+The -r option was coded to use a stable sort - packets that have the same accept time will keep their relative ordering to each other.
+
+Multithreading was not found to increase performance. The difference from parsing the PCAP, which has to be sequential [^1], to the formatting of the quote is approximately 1.25 nanoseconds per packet [^2]. Synchronization of the threads and moving data across cores results in significantly slower processing.
 
 ### Example output
+
+Timestamps are formatted as ISO 8601 local time format and the quantity@price string is right-aligned to 13-character wide columns.
+
 ```text
 $ cargo run --release -- -r dataset/mdf-kospi200.20110216-0.pcap
 09:00:00.006437 08:59:59.970000 KR4201F32705           0@0           0@0           0@0           0@0           0@0           0@0           0@0           0@0           0@0           0@0
@@ -42,4 +47,4 @@ $ cargo run -p kospi-generator -- 10
 The PCAP files are kept over at [dataset](dataset).
 
 [^1]: The `cap_len` dictates the size of the PCAP packet and it needs to be read from the header for each packet.
-[^2]: From the benchmarks `cargo bench -p kospi-parser`, the difference between "quote iterator" and "sorted quote iterator (buckets)" is (372.53 µs - 275.08 µs) / 16000 packets ≈ 6 ns
+[^2]: From the benchmarks `cargo bench -p kospi-parser` on an Apple M4, the difference between "quote iterator" and "sorted quote iterator (buckets)" is (293.38 µs - 273.3 µs) / 16000 packets ≈ 1.25 ns
