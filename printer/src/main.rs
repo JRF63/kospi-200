@@ -3,7 +3,7 @@ use std::io::{BufWriter, Write};
 
 use kospi_parser::{PcapIterator, QuoteIterator, SortedQuoteIteratorBuckets, open_mmaped_file};
 
-const STDOUT_BUF_SIZE: usize = 128_000; // Use a large value to minimize syscalls
+const STDOUT_BUF_SIZE: usize = 128 * 1024; // Use a large value to minimize syscalls
 
 #[derive(Parser)]
 struct Args {
