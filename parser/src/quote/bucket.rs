@@ -9,6 +9,7 @@ use std::{collections::VecDeque, iter::FusedIterator};
 const NUM_BUCKETS: usize = 512;
 
 const EPOCH: Timestamp = Timestamp::from_secs_and_nanos(0, 0);
+const THREE_SECONDS: Timestamp = Timestamp::from_secs_and_nanos(3, 0);
 
 #[derive(Debug, Clone)]
 struct Bucket<'a> {
@@ -54,11 +55,19 @@ impl<'a> Bucket<'a> {
     }
 }
 
+struct PendingPush<'a> {
+    index: usize,
+    quote: QuotePacket<'a>,
+    accept_time: Timestamp,
+    midnight_at_timezone: Timestamp,
+}
+
 // Bucket sorting - O(N)
 pub struct SortedQuoteIteratorBuckets<'a, T> {
     quote_iterator: T,
     buckets: [Bucket<'a>; NUM_BUCKETS],
     earliest_accept_time: Timestamp,
+    pending_push: Option<PendingPush<'a>>,
 
     // Tried to use a `usize` for these indices with `NUM_BUCKETS` as a sentinel but that resulted
     // in 2% worse performance
@@ -76,6 +85,7 @@ where
             quote_iterator,
             buckets: std::array::from_fn(|_| Bucket::with_capacity(bucket_capacity)),
             earliest_accept_time: Timestamp::from_secs_and_nanos(0, i64::MAX),
+            pending_push: None,
             emit_idx: None,
             safe_idx: None,
             last_idx: None,
@@ -97,7 +107,6 @@ impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
             let bucket = unsafe { buckets.get_unchecked_mut(next_idx) };
 
             if let Some(quote) = bucket.pop() {
-                *emit_idx = next_idx;
                 return Some(quote);
             }
 
@@ -105,6 +114,7 @@ impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
                 break;
             }
             next_idx = (next_idx + 1) % NUM_BUCKETS;
+            *emit_idx = next_idx;
         }
         None
     }
@@ -154,7 +164,15 @@ where
             return Some(quote);
         }
 
-        const THREE_SECONDS: Timestamp = Timestamp::from_secs_and_nanos(3, 0);
+        if let Some(PendingPush {
+            index,
+            quote,
+            accept_time,
+            midnight_at_timezone,
+        }) = self.pending_push.take()
+        {
+            self.buckets[index].push(quote, accept_time, midnight_at_timezone);
+        }
 
         for quote in self.quote_iterator.by_ref() {
             // TODO: Try leaving calcs in centiseconds
@@ -165,13 +183,10 @@ where
                 data,
             } = quote.into_quote();
 
-            let safe_idx = {
+            self.safe_idx = Some({
                 let safe_time = pkt_time - THREE_SECONDS;
                 safe_time.timestamp_centiseconds() as usize % NUM_BUCKETS
-            };
-            self.safe_idx = Some(safe_idx);
-
-            let idx = accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
+            });
 
             // Initialize the index of the bucket that will be emitted first
             if self.emit_idx.is_none() {
@@ -186,16 +201,27 @@ where
                 }
             }
 
-            self.buckets[idx].push(
-                QuotePacket { pkt_time, data },
-                accept_time,
-                midnight_at_timezone,
-            );
+            let idx = accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
 
             if let Some(quote) =
                 Self::try_emit_elapsed_packet(&mut self.emit_idx, self.safe_idx, &mut self.buckets)
             {
+                // Postpone pushing the current quote
+                let pending_push = PendingPush {
+                    index: idx,
+                    quote: QuotePacket { pkt_time, data },
+                    accept_time,
+                    midnight_at_timezone,
+                };
+                self.pending_push = Some(pending_push);
+
                 return Some(quote);
+            } else {
+                self.buckets[idx].push(
+                    QuotePacket { pkt_time, data },
+                    accept_time,
+                    midnight_at_timezone,
+                );
             }
         }
 
