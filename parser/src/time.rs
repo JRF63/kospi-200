@@ -64,7 +64,7 @@ impl Timestamp {
     }
 
     /// Returns the midnight timestamp at the given timezone
-    pub fn get_midnight_at_timezone(&self, tz_offset: i64) -> Self {
+    pub const fn get_midnight_at_timezone(&self, tz_offset: i64) -> Self {
         let time_at_timezone = self.0 + tz_offset;
         let days_since_epoch = time_at_timezone / NANOS_PER_DAY;
         let nanos_midnight = days_since_epoch * NANOS_PER_DAY;

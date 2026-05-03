@@ -1,6 +1,5 @@
 use crate::{
-    pcap::PcapIterator,
-    quote::{QUOTE_PACKET_SIZE, Quote, QuoteIterator},
+    quote::{QUOTE_PACKET_SIZE, Quote, QuotePacket},
     time::Timestamp,
 };
 use std::{collections::BinaryHeap, iter::FusedIterator};
@@ -63,25 +62,34 @@ impl<'a> From<HeapQuotePacket<'a>> for Quote<'a> {
 }
 
 // O(N*log(N)) sorting
-pub struct SortedQuoteIteratorHeap<'a> {
-    quote_iterator: QuoteIterator<'a>,
+pub struct SortedQuoteIteratorHeap<'a, T> {
+    quote_iterator: T,
     heap: BinaryHeap<HeapQuotePacket<'a>>,
     seq_num: usize,
 }
 
-impl<'a> SortedQuoteIteratorHeap<'a> {
-    pub fn new(pcap_iterator: PcapIterator<'a>, init_capacity: usize) -> Self {
+impl<'a, T> SortedQuoteIteratorHeap<'a, T>
+where
+    T: Iterator<Item = QuotePacket<'a>>,
+{
+    pub fn with_capacity(quote_iterator: T, init_capacity: usize) -> Self {
         Self {
-            quote_iterator: QuoteIterator::new(pcap_iterator),
+            quote_iterator,
             heap: BinaryHeap::with_capacity(init_capacity),
             seq_num: 0,
         }
     }
 }
 
-impl<'a> FusedIterator for SortedQuoteIteratorHeap<'a> {}
+impl<'a, T> FusedIterator for SortedQuoteIteratorHeap<'a, T> where
+    T: Iterator<Item = QuotePacket<'a>>
+{
+}
 
-impl<'a> Iterator for SortedQuoteIteratorHeap<'a> {
+impl<'a, T> Iterator for SortedQuoteIteratorHeap<'a, T>
+where
+    T: Iterator<Item = QuotePacket<'a>>,
+{
     type Item = Quote<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {

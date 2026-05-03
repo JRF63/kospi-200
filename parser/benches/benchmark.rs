@@ -33,7 +33,8 @@ fn criterion_benchmark(c: &mut Criterion) {
         b.iter(|| {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
             let pcap_iterator = PcapIterator::new(&mmap);
-            let quote_iterator = SortedQuoteIteratorHeap::new(pcap_iterator, 3000);
+            let quote_iterator =
+                SortedQuoteIteratorHeap::with_capacity(QuoteIterator::new(pcap_iterator), 3000);
             let lines = quote_iterator.map(|x| x.to_line_bytes());
             lines.count()
         })
@@ -42,9 +43,13 @@ fn criterion_benchmark(c: &mut Criterion) {
     // not worth parallelizing.
     c.bench_function("sorted quote iterator (buckets)", |b| {
         b.iter(|| {
+            const BUCKET_INIT_CAPACITY: usize = 32;
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
             let pcap_iterator = PcapIterator::new(&mmap);
-            let quote_iterator = SortedQuoteIteratorBuckets::new(pcap_iterator);
+            let quote_iterator = SortedQuoteIteratorBuckets::with_capacity(
+                QuoteIterator::new(pcap_iterator),
+                BUCKET_INIT_CAPACITY,
+            );
             let lines = quote_iterator.map(|x| x.to_line_bytes());
             lines.count()
         })

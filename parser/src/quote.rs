@@ -349,14 +349,16 @@ fn test_quote_parsing() {
     let count_b = {
         let mmap = crate::open_mmaped_file(filename).unwrap();
         let pcap_iterator = PcapIterator::new(&mmap);
-        let quote_iterator = SortedQuoteIteratorHeap::new(pcap_iterator, 3000);
+        let quote_iterator =
+            SortedQuoteIteratorHeap::with_capacity(QuoteIterator::new(pcap_iterator), 3000);
         quote_iterator.count()
     };
 
     let count_c = {
         let mmap = crate::open_mmaped_file(filename).unwrap();
         let pcap_iterator = PcapIterator::new(&mmap);
-        let quote_iterator = SortedQuoteIteratorBuckets::new(pcap_iterator);
+        let quote_iterator =
+            SortedQuoteIteratorBuckets::with_capacity(QuoteIterator::new(pcap_iterator), 32);
         quote_iterator.count()
     };
 
@@ -372,13 +374,13 @@ fn test_quote_sorting() {
     let mmap = crate::open_mmaped_file(filename).unwrap();
     let quote_iterator_a = {
         let pcap_iterator = PcapIterator::new(&mmap);
-        SortedQuoteIteratorHeap::new(pcap_iterator, 3000)
+        SortedQuoteIteratorHeap::with_capacity(QuoteIterator::new(pcap_iterator), 3000)
     };
 
     let mmap = crate::open_mmaped_file(filename).unwrap();
     let quote_iterator_b = {
         let pcap_iterator = PcapIterator::new(&mmap);
-        SortedQuoteIteratorBuckets::new(pcap_iterator)
+        SortedQuoteIteratorBuckets::with_capacity(QuoteIterator::new(pcap_iterator), 32)
     };
 
     let mut accept_time_a = Timestamp::from_secs_and_nanos(0, 0);
@@ -391,5 +393,85 @@ fn test_quote_sorting() {
 
         assert!(accept_time_b <= b.accept_time);
         accept_time_b = b.accept_time;
+
+        assert_eq!(a, b);
+    }
+}
+
+#[test]
+fn test_bucket_sort_corner_case() {
+    const NANOS_PER_CENT: i64 = 10000000;
+    const THREE_SECONDS: Timestamp = Timestamp::from_secs_and_nanos(3, 0);
+
+    const START: Timestamp = Timestamp::from_secs_and_nanos(1297814400, 0);
+    const MIDNIGHT: Timestamp = START.get_midnight_at_timezone(Timestamp::TIMEZONE_KST);
+
+    // (data, accept_time, pkt_time)
+    let mut packet_data = [
+        (
+            vec![b'0'; QUOTE_PACKET_SIZE],
+            START + Timestamp::from_secs_and_nanos(0, 0),
+            START + Timestamp::from_secs_and_nanos(0, 5 * NANOS_PER_CENT),
+        ),
+        (
+            vec![b'0'; QUOTE_PACKET_SIZE],
+            START + Timestamp::from_secs_and_nanos(0, 10 * NANOS_PER_CENT),
+            START + Timestamp::from_secs_and_nanos(0, 15 * NANOS_PER_CENT),
+        ),
+        (
+            vec![b'0'; QUOTE_PACKET_SIZE],
+            START + Timestamp::from_secs_and_nanos(0, 20 * NANOS_PER_CENT),
+            START + Timestamp::from_secs_and_nanos(0, 25 * NANOS_PER_CENT),
+        ),
+        (
+            vec![b'0'; QUOTE_PACKET_SIZE],
+            START + Timestamp::from_secs_and_nanos(0, 512 * NANOS_PER_CENT),
+            START + Timestamp::from_secs_and_nanos(0, 517 * NANOS_PER_CENT),
+        ),
+        (
+            vec![b'0'; QUOTE_PACKET_SIZE],
+            START + Timestamp::from_secs_and_nanos(0, 522 * NANOS_PER_CENT),
+            START + Timestamp::from_secs_and_nanos(0, 527 * NANOS_PER_CENT),
+        ),
+        (
+            vec![b'0'; QUOTE_PACKET_SIZE],
+            START + Timestamp::from_secs_and_nanos(0, 532 * NANOS_PER_CENT),
+            START + Timestamp::from_secs_and_nanos(0, 537 * NANOS_PER_CENT),
+        ),
+    ];
+
+    let packets = packet_data.each_mut().map(|(data, accept_time, pkt_time)| {
+        data[206..214].copy_from_slice(&accept_time.as_hhmmssuu_string(MIDNIGHT));
+        QuotePacket {
+            pkt_time: *pkt_time,
+            data: data.as_slice().try_into().unwrap(),
+        }
+    });
+
+    for (i, p) in packets.iter().enumerate() {
+        let Quote { accept_time, .. } = p.clone().into_quote();
+        assert!(
+            p.pkt_time - accept_time <= THREE_SECONDS,
+            "{}: {:?}",
+            i,
+            p.pkt_time - accept_time
+        );
+    }
+
+    let quote_iterator_a = SortedQuoteIteratorHeap::with_capacity(packets.iter().cloned(), 10);
+    let quote_iterator_b = SortedQuoteIteratorBuckets::with_capacity(packets.iter().cloned(), 32);
+
+    let mut accept_time_a = Timestamp::from_secs_and_nanos(0, 0);
+    let mut accept_time_b = Timestamp::from_secs_and_nanos(0, 0);
+
+    for (a, b) in quote_iterator_a.zip(quote_iterator_b) {
+        // Test if accept times are monotonically increasing
+        assert!(accept_time_a <= a.accept_time);
+        accept_time_a = a.accept_time;
+
+        assert!(accept_time_b <= b.accept_time);
+        accept_time_b = b.accept_time;
+
+        assert_eq!(a, b);
     }
 }

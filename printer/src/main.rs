@@ -24,7 +24,11 @@ fn main() -> std::io::Result<()> {
     let mut writer = BufWriter::with_capacity(STDOUT_BUF_SIZE, std::io::stdout().lock());
 
     if args.reorder {
-        let quote_iterator = SortedQuoteIteratorBuckets::new(pcap_iterator);
+        const BUCKET_INIT_CAPACITY: usize = 32;
+        let quote_iterator = SortedQuoteIteratorBuckets::with_capacity(
+            QuoteIterator::new(pcap_iterator),
+            BUCKET_INIT_CAPACITY,
+        );
 
         // Prints the quote in order of ascending accept time
         for quote in quote_iterator {

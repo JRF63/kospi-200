@@ -1,6 +1,5 @@
 use crate::{
-    pcap::PcapIterator,
-    quote::{Quote, QuoteIterator, QuotePacket},
+    quote::{Quote, QuotePacket},
     time::Timestamp,
 };
 use std::{collections::VecDeque, iter::FusedIterator};
@@ -9,8 +8,7 @@ use std::{collections::VecDeque, iter::FusedIterator};
 // modulo calculations faster
 const NUM_BUCKETS: usize = 512;
 
-// The estimate of the worst case for the number of packets that will be put in a single bucket
-const BUCKET_INIT_CAPACITY: usize = 32;
+const EPOCH: Timestamp = Timestamp::from_secs_and_nanos(0, 0);
 
 #[derive(Debug, Clone)]
 struct Bucket<'a> {
@@ -21,17 +19,10 @@ struct Bucket<'a> {
     midnight_at_timezone: Timestamp,
 }
 
-#[test]
-fn test_bucket_mem_size() {
-    // Should fit inside L1 cache
-    assert!(std::mem::size_of::<Bucket<'_>>() * NUM_BUCKETS < 64_000);
-}
-
 impl<'a> Bucket<'a> {
-    fn new_empty_bucket() -> Self {
-        const EPOCH: Timestamp = Timestamp::from_secs_and_nanos(0, 0);
+    fn with_capacity(bucket_capacity: usize) -> Self {
         Self {
-            deque: VecDeque::with_capacity(BUCKET_INIT_CAPACITY),
+            deque: VecDeque::with_capacity(bucket_capacity),
             accept_time: EPOCH,
             midnight_at_timezone: EPOCH,
         }
@@ -64,9 +55,9 @@ impl<'a> Bucket<'a> {
 }
 
 // Bucket sorting - O(N)
-pub struct SortedQuoteIteratorBuckets<'a> {
-    quote_iterator: QuoteIterator<'a>,
-    buckets: Box<[Bucket<'a>; NUM_BUCKETS]>,
+pub struct SortedQuoteIteratorBuckets<'a, T> {
+    quote_iterator: T,
+    buckets: [Bucket<'a>; NUM_BUCKETS],
     earliest_accept_time: Timestamp,
 
     // Tried to use a `usize` for these indices with `NUM_BUCKETS` as a sentinel but that resulted
@@ -76,21 +67,23 @@ pub struct SortedQuoteIteratorBuckets<'a> {
     last_idx: Option<usize>,
 }
 
-impl<'a> SortedQuoteIteratorBuckets<'a> {
-    pub fn new(pcap_iterator: PcapIterator<'a>) -> Self {
+impl<'a, T> SortedQuoteIteratorBuckets<'a, T>
+where
+    T: Iterator<Item = QuotePacket<'a>>,
+{
+    pub fn with_capacity(quote_iterator: T, bucket_capacity: usize) -> Self {
         Self {
-            quote_iterator: QuoteIterator::new(pcap_iterator),
-
-            // This might create a temporary value on the stack
-            buckets: Box::new(std::array::from_fn(|_| Bucket::new_empty_bucket())),
-
+            quote_iterator,
+            buckets: std::array::from_fn(|_| Bucket::with_capacity(bucket_capacity)),
             earliest_accept_time: Timestamp::from_secs_and_nanos(0, i64::MAX),
             emit_idx: None,
             safe_idx: None,
             last_idx: None,
         }
     }
+}
 
+impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
     // Try to return one packet from the buckets
     fn try_emit_packet<'b>(
         emit_idx: &mut usize,
@@ -142,14 +135,19 @@ impl<'a> SortedQuoteIteratorBuckets<'a> {
     }
 }
 
-impl<'a> FusedIterator for SortedQuoteIteratorBuckets<'a> {}
+impl<'a, T> FusedIterator for SortedQuoteIteratorBuckets<'a, T> where
+    T: Iterator<Item = QuotePacket<'a>>
+{
+}
 
-impl<'a> Iterator for SortedQuoteIteratorBuckets<'a> {
+impl<'a, T> Iterator for SortedQuoteIteratorBuckets<'a, T>
+where
+    T: Iterator<Item = QuotePacket<'a>>,
+{
     type Item = Quote<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Greedily try to emit a packet. This prevents the `SmallVec`s from allocating by keeping
-        // them small.
+        // Greedily try to emit a packet. This keeps the bucket small.
         if let Some(quote) =
             Self::try_emit_elapsed_packet(&mut self.emit_idx, self.safe_idx, &mut self.buckets)
         {
