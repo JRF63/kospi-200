@@ -66,6 +66,7 @@ struct PendingPush<'a> {
 pub struct SortedQuoteIteratorBuckets<'a, T> {
     quote_iterator: T,
     buckets: [Bucket<'a>; NUM_BUCKETS],
+    drain_bucket_idx: Option<usize>,
     earliest_accept_time: Timestamp,
     pending_push: Option<PendingPush<'a>>,
 
@@ -84,6 +85,7 @@ where
         Self {
             quote_iterator,
             buckets: std::array::from_fn(|_| Bucket::with_capacity(bucket_capacity)),
+            drain_bucket_idx: None,
             earliest_accept_time: Timestamp::from_secs_and_nanos(0, i64::MAX),
             pending_push: None,
             emit_idx: None,
@@ -94,12 +96,11 @@ where
 }
 
 impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
-    // Try to return one packet from the buckets
-    fn try_emit_next_packet<'b>(
+    fn find_non_empty_bucket<'b>(
         emit_idx: &mut usize,
         safe_idx: usize,
         buckets: &mut [Bucket<'b>; NUM_BUCKETS],
-    ) -> Option<Quote<'b>> {
+    ) -> Option<(usize, Quote<'b>)> {
         let mut next_idx = *emit_idx;
         loop {
             // SAFETY: `emit_idx` should be < `NUM_BUCKETS`, `next_idx` is also clamped to
@@ -107,7 +108,7 @@ impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
             let bucket = unsafe { buckets.get_unchecked_mut(next_idx) };
 
             if let Some(quote) = bucket.pop() {
-                return Some(quote);
+                return Some((next_idx, quote));
             }
 
             if next_idx == safe_idx {
@@ -141,12 +142,24 @@ where
     type Item = Quote<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.drain_bucket_idx {
+            // SAFETY: Indices returned by `find_non_empty_bucket` should always be in range
+            let bucket = unsafe { self.buckets.get_unchecked_mut(index) };
+
+            if let Some(quote) = bucket.pop() {
+                return Some(quote);
+            }
+        }
+        self.drain_bucket_idx = None;
+
         // Greedily try to emit a packet. This keeps the bucket small.
         if let Some(emit_idx) = &mut self.emit_idx
             && let Some(safe_idx) = self.safe_idx
             && Self::is_current_index_expired(*emit_idx, safe_idx)
-            && let Some(quote) = Self::try_emit_next_packet(emit_idx, safe_idx, &mut self.buckets)
+            && let Some((index, quote)) =
+                Self::find_non_empty_bucket(emit_idx, safe_idx, &mut self.buckets)
         {
+            self.drain_bucket_idx = Some(index);
             return Some(quote);
         }
 
@@ -192,8 +205,8 @@ where
             if let Some(emit_idx) = &mut self.emit_idx
                 && let Some(safe_idx) = self.safe_idx
                 && Self::is_current_index_expired(*emit_idx, safe_idx)
-                && let Some(quote) =
-                    Self::try_emit_next_packet(emit_idx, safe_idx, &mut self.buckets)
+                && let Some((index, quote)) =
+                    Self::find_non_empty_bucket(emit_idx, safe_idx, &mut self.buckets)
             {
                 // Postpone pushing the current quote
                 let pending_push = PendingPush {
@@ -204,6 +217,7 @@ where
                 };
                 self.pending_push = Some(pending_push);
 
+                self.drain_bucket_idx = Some(index);
                 return Some(quote);
             } else {
                 self.buckets[idx].push(
@@ -218,9 +232,10 @@ where
         if let Some(emit_idx) = self.emit_idx.as_mut() {
             match self.last_idx {
                 Some(last_idx) => {
-                    if let Some(quote) =
-                        Self::try_emit_next_packet(emit_idx, last_idx, &mut self.buckets)
+                    if let Some((index, quote)) =
+                        Self::find_non_empty_bucket(emit_idx, last_idx, &mut self.buckets)
                     {
+                        self.drain_bucket_idx = Some(index);
                         return Some(quote);
                     }
                 }
@@ -230,9 +245,10 @@ where
                         i => i - 1,
                     };
                     self.last_idx = Some(last_idx);
-                    if let Some(quote) =
-                        Self::try_emit_next_packet(emit_idx, last_idx, &mut self.buckets)
+                    if let Some((index, quote)) =
+                        Self::find_non_empty_bucket(emit_idx, last_idx, &mut self.buckets)
                     {
+                        self.drain_bucket_idx = Some(index);
                         return Some(quote);
                     }
                 }
