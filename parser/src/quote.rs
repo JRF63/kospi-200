@@ -425,6 +425,7 @@ fn test_bucket_sort_corner_case() {
         ),
         (
             vec![b'0'; QUOTE_PACKET_SIZE],
+            // This should have the same slot/bucket as the first packet
             START + Timestamp::from_secs_and_nanos(0, 512 * NANOS_PER_CENT),
             START + Timestamp::from_secs_and_nanos(0, 517 * NANOS_PER_CENT),
         ),
@@ -465,9 +466,6 @@ fn test_bucket_sort_corner_case() {
     let mut accept_time_b = Timestamp::from_secs_and_nanos(0, 0);
 
     for (a, b) in quote_iterator_a.zip(quote_iterator_b) {
-        eprintln!("{:?} {:?}", a.accept_time, b.accept_time);
-
-        // Test if accept times are monotonically increasing
         assert!(accept_time_a <= a.accept_time);
         accept_time_a = a.accept_time;
 

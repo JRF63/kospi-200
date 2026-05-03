@@ -95,7 +95,7 @@ where
 
 impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
     // Try to return one packet from the buckets
-    fn try_emit_packet<'b>(
+    fn try_emit_next_packet<'b>(
         emit_idx: &mut usize,
         safe_idx: usize,
         buckets: &mut [Bucket<'b>; NUM_BUCKETS],
@@ -119,29 +119,13 @@ impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
         None
     }
 
-    // Return a packet older than 3 seconds
-    fn try_emit_elapsed_packet<'b>(
-        emit_idx: &mut Option<usize>,
-        safe_idx: Option<usize>,
-        buckets: &mut [Bucket<'b>; NUM_BUCKETS],
-    ) -> Option<Quote<'b>> {
-        if let Some(emit_idx) = emit_idx.as_mut()
-            && let Some(safe_idx) = safe_idx
-        {
-            // Check if `safe_idx` >= `emit_idx` using the half-range rule
-            let gt_or_eq = {
-                let diff = safe_idx.wrapping_sub(*emit_idx) % NUM_BUCKETS;
+    // Check if current emittable index is older than 3 seconds
+    fn is_current_index_expired(emit_idx: usize, safe_idx: usize) -> bool {
+        // Check if `safe_idx` >= `emit_idx` using the half-range rule
+        let diff = safe_idx.wrapping_sub(emit_idx) % NUM_BUCKETS;
 
-                // diff >= 0 && diff <= mid
-                (0..=(NUM_BUCKETS / 2)).contains(&diff)
-            };
-
-            if gt_or_eq && let Some(quote) = Self::try_emit_packet(emit_idx, safe_idx, buckets) {
-                return Some(quote);
-            }
-        }
-
-        None
+        // diff >= 0 && diff <= mid
+        (0..=(NUM_BUCKETS / 2)).contains(&diff)
     }
 }
 
@@ -158,8 +142,10 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         // Greedily try to emit a packet. This keeps the bucket small.
-        if let Some(quote) =
-            Self::try_emit_elapsed_packet(&mut self.emit_idx, self.safe_idx, &mut self.buckets)
+        if let Some(emit_idx) = &mut self.emit_idx
+            && let Some(safe_idx) = self.safe_idx
+            && Self::is_current_index_expired(*emit_idx, safe_idx)
+            && let Some(quote) = Self::try_emit_next_packet(emit_idx, safe_idx, &mut self.buckets)
         {
             return Some(quote);
         }
@@ -203,8 +189,11 @@ where
 
             let idx = accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
 
-            if let Some(quote) =
-                Self::try_emit_elapsed_packet(&mut self.emit_idx, self.safe_idx, &mut self.buckets)
+            if let Some(emit_idx) = &mut self.emit_idx
+                && let Some(safe_idx) = self.safe_idx
+                && Self::is_current_index_expired(*emit_idx, safe_idx)
+                && let Some(quote) =
+                    Self::try_emit_next_packet(emit_idx, safe_idx, &mut self.buckets)
             {
                 // Postpone pushing the current quote
                 let pending_push = PendingPush {
@@ -230,7 +219,7 @@ where
             match self.last_idx {
                 Some(last_idx) => {
                     if let Some(quote) =
-                        Self::try_emit_packet(emit_idx, last_idx, &mut self.buckets)
+                        Self::try_emit_next_packet(emit_idx, last_idx, &mut self.buckets)
                     {
                         return Some(quote);
                     }
@@ -242,7 +231,7 @@ where
                     };
                     self.last_idx = Some(last_idx);
                     if let Some(quote) =
-                        Self::try_emit_packet(emit_idx, last_idx, &mut self.buckets)
+                        Self::try_emit_next_packet(emit_idx, last_idx, &mut self.buckets)
                     {
                         return Some(quote);
                     }
