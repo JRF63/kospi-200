@@ -2,6 +2,7 @@
 name = "kospi-parser"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95.0" # For std::hint::cold_path
 
 [dependencies]
 memmap2 = "0.9.10"
