@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{collections::VecDeque, iter::FusedIterator};
 
-// Need at least 300 (3 seconds + centisecond resolution) but use the nearest power of two to make
+// Need at least 300 (3 seconds + centisecond resolution) but use the next power of two to make
 // modulo calculations faster
 const NUM_BUCKETS: usize = 512;
 
@@ -43,7 +43,7 @@ impl<'a> Bucket<'a> {
 
     fn push(
         &mut self,
-        quote: QuotePacket<'a>,
+        quote_packet: QuotePacket<'a>,
         accept_time: Timestamp,
         midnight_at_timezone: Timestamp,
     ) {
@@ -51,15 +51,8 @@ impl<'a> Bucket<'a> {
         self.midnight_at_timezone = midnight_at_timezone;
 
         // Insert to the front to maintain a stable sort
-        self.deque.push_front(quote);
+        self.deque.push_front(quote_packet);
     }
-}
-
-struct PendingPush<'a> {
-    index: usize,
-    quote: QuotePacket<'a>,
-    accept_time: Timestamp,
-    midnight_at_timezone: Timestamp,
 }
 
 // Bucket sorting - O(N)
@@ -67,14 +60,22 @@ pub struct SortedQuoteIteratorBuckets<'a, T> {
     quote_iterator: T,
     buckets: [Bucket<'a>; NUM_BUCKETS],
     drain_bucket_idx: Option<usize>,
-    earliest_accept_time: Timestamp,
-    pending_push: Option<PendingPush<'a>>,
-
-    // Tried to use a `usize` for these indices with `NUM_BUCKETS` as a sentinel but that resulted
-    // in 2% worse performance
     emit_idx: Option<usize>,
-    safe_idx: Option<usize>,
-    last_idx: Option<usize>,
+    earliest_accept_time: Timestamp,
+    state: State<'a>,
+}
+
+struct PendingPush<'a> {
+    index: usize,
+    quote_packet: QuotePacket<'a>,
+    accept_time: Timestamp,
+    midnight_at_timezone: Timestamp,
+}
+
+enum State<'a> {
+    DrainIterator,
+    EmitQuote(usize, PendingPush<'a>),
+    DrainBuckets(usize),
 }
 
 impl<'a, T> SortedQuoteIteratorBuckets<'a, T>
@@ -86,16 +87,20 @@ where
             quote_iterator,
             buckets: std::array::from_fn(|_| Bucket::with_capacity(bucket_capacity)),
             drain_bucket_idx: None,
+
+            // Set to the largest possible timestamp so it gets immediately overwritten by the first
+            // packet
             earliest_accept_time: Timestamp::from_secs_and_nanos(0, i64::MAX),
-            pending_push: None,
+
             emit_idx: None,
-            safe_idx: None,
-            last_idx: None,
+            state: State::DrainIterator,
         }
     }
 }
 
 impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
+    // Return the index of the oldest non-empty bucket and also return the oldest quote in that
+    // bucket.
     fn find_non_empty_bucket<'b>(
         emit_idx: &mut usize,
         safe_idx: usize,
@@ -142,6 +147,9 @@ where
     type Item = Quote<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Return the packets from the current bucket. If one packet was returned and
+        // `self.drain_bucket_idx` was set to `Some`, then all the other packets in the same bucket
+        // must also be older than 3 seconds.
         if let Some(index) = self.drain_bucket_idx {
             // SAFETY: Indices returned by `find_non_empty_bucket` should always be in range
             let bucket = unsafe { self.buckets.get_unchecked_mut(index) };
@@ -152,105 +160,140 @@ where
         }
         self.drain_bucket_idx = None;
 
-        // Greedily try to emit a packet. This keeps the bucket small.
-        if let Some(emit_idx) = &mut self.emit_idx
-            && let Some(safe_idx) = self.safe_idx
-            && Self::is_current_index_expired(*emit_idx, safe_idx)
-            && let Some((index, quote)) =
-                Self::find_non_empty_bucket(emit_idx, safe_idx, &mut self.buckets)
-        {
-            self.drain_bucket_idx = Some(index);
-            return Some(quote);
-        }
+        'outer: loop {
+            match self.state {
+                State::DrainIterator => {
+                    for quote_packet in self.quote_iterator.by_ref() {
+                        // TODO: Try leaving calcs in centiseconds
+                        let Quote {
+                            pkt_time,
+                            accept_time,
+                            midnight_at_timezone,
+                            data,
+                        } = quote_packet.into_quote();
 
-        if let Some(PendingPush {
-            index,
-            quote,
-            accept_time,
-            midnight_at_timezone,
-        }) = self.pending_push.take()
-        {
-            self.buckets[index].push(quote, accept_time, midnight_at_timezone);
-        }
+                        // Initialize the index of the bucket that will be emitted first
+                        if self.emit_idx.is_none() {
+                            if accept_time < self.earliest_accept_time {
+                                self.earliest_accept_time = accept_time;
+                            }
 
-        for quote in self.quote_iterator.by_ref() {
-            // TODO: Try leaving calcs in centiseconds
-            let Quote {
-                pkt_time,
-                accept_time,
-                midnight_at_timezone,
-                data,
-            } = quote.into_quote();
+                            if pkt_time - self.earliest_accept_time >= THREE_SECONDS {
+                                let emit_idx = self.earliest_accept_time.timestamp_centiseconds()
+                                    as usize
+                                    % NUM_BUCKETS;
+                                self.emit_idx = Some(emit_idx);
+                            }
+                        }
 
-            self.safe_idx = Some({
-                let safe_time = pkt_time - THREE_SECONDS;
-                safe_time.timestamp_centiseconds() as usize % NUM_BUCKETS
-            });
+                        // The index of (current_time - 3) seconds
+                        let safe_idx = {
+                            let safe_time = pkt_time - THREE_SECONDS;
+                            safe_time.timestamp_centiseconds() as usize % NUM_BUCKETS
+                        };
 
-            // Initialize the index of the bucket that will be emitted first
-            if self.emit_idx.is_none() {
-                if accept_time < self.earliest_accept_time {
-                    self.earliest_accept_time = accept_time;
-                }
+                        let pending_push = PendingPush {
+                            index: accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS,
+                            quote_packet: QuotePacket { pkt_time, data },
+                            accept_time,
+                            midnight_at_timezone,
+                        };
 
-                if pkt_time - self.earliest_accept_time >= THREE_SECONDS {
-                    let emit_idx =
-                        self.earliest_accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
-                    self.emit_idx = Some(emit_idx);
-                }
-            }
+                        // Same logic as `State::EmitQuote` below but inlined here for performance.
+                        // This if-else is equivalent to:
+                        // ```
+                        // self.state = State::EmitQuote(safe_idx, pending_push);
+                        // continue 'outer;
+                        // ```
+                        if let Some(emit_idx) = self.emit_idx.as_mut()
+                            && Self::is_current_index_expired(*emit_idx, safe_idx)
+                            && let Some((drain_bucket_idx, quote)) =
+                                Self::find_non_empty_bucket(emit_idx, safe_idx, &mut self.buckets)
+                        {
+                            self.state = State::EmitQuote(safe_idx, pending_push);
+                            self.drain_bucket_idx = Some(drain_bucket_idx);
+                            return Some(quote);
+                        } else {
+                            let PendingPush {
+                                index,
+                                quote_packet,
+                                accept_time,
+                                midnight_at_timezone,
+                            } = pending_push;
 
-            let idx = accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS;
-
-            if let Some(emit_idx) = &mut self.emit_idx
-                && let Some(safe_idx) = self.safe_idx
-                && Self::is_current_index_expired(*emit_idx, safe_idx)
-                && let Some((index, quote)) =
-                    Self::find_non_empty_bucket(emit_idx, safe_idx, &mut self.buckets)
-            {
-                // Postpone pushing the current quote
-                let pending_push = PendingPush {
-                    index: idx,
-                    quote: QuotePacket { pkt_time, data },
-                    accept_time,
-                    midnight_at_timezone,
-                };
-                self.pending_push = Some(pending_push);
-
-                self.drain_bucket_idx = Some(index);
-                return Some(quote);
-            } else {
-                self.buckets[idx].push(
-                    QuotePacket { pkt_time, data },
-                    accept_time,
-                    midnight_at_timezone,
-                );
-            }
-        }
-
-        // Drain the rest of the packets from the buckets
-        if let Some(emit_idx) = self.emit_idx.as_mut() {
-            match self.last_idx {
-                Some(last_idx) => {
-                    if let Some((index, quote)) =
-                        Self::find_non_empty_bucket(emit_idx, last_idx, &mut self.buckets)
-                    {
-                        self.drain_bucket_idx = Some(index);
-                        return Some(quote);
+                            // SAFETY: `index` was calculated modulo `NUM_BUCKETS`
+                            let bucket = unsafe { self.buckets.get_unchecked_mut(index) };
+                            bucket.push(quote_packet, accept_time, midnight_at_timezone);
+                        }
                     }
-                }
-                None => {
-                    let last_idx = match *emit_idx {
+
+                    let emit_idx = match self.emit_idx {
+                        Some(emit_idx) => emit_idx,
+                        None => {
+                            // If `self.emit_idx ` is `None`, that implies all of the packets are
+                            // younger than 3 seconds. `self.quote_iterator` is completely drained
+                            // but the packets still need to be emptied from the buckets.
+                            let emit_idx = self.earliest_accept_time.timestamp_centiseconds()
+                                as usize
+                                % NUM_BUCKETS;
+                            self.emit_idx = Some(emit_idx);
+                            emit_idx
+                        }
+                    };
+                    let last_idx = match emit_idx {
                         0 => NUM_BUCKETS - 1,
                         i => i - 1,
                     };
-                    self.last_idx = Some(last_idx);
-                    if let Some((index, quote)) =
-                        Self::find_non_empty_bucket(emit_idx, last_idx, &mut self.buckets)
+                    self.state = State::DrainBuckets(last_idx);
+                }
+                State::EmitQuote(safe_idx, _) => {
+                    // Drain all expired packets
+                    if let Some(emit_idx) = self.emit_idx.as_mut()
+                        && Self::is_current_index_expired(*emit_idx, safe_idx)
+                        && let Some((drain_bucket_idx, quote)) =
+                            Self::find_non_empty_bucket(emit_idx, safe_idx, &mut self.buckets)
                     {
-                        self.drain_bucket_idx = Some(index);
+                        self.drain_bucket_idx = Some(drain_bucket_idx);
+                        return Some(quote);
+
+                    // The earliest that the pending packet could be is (T - 3) seconds. We first
+                    // return all packets <= (T - 3) seconds on the if part of this if-else before
+                    // adding the pending packet to the buckets in this else.
+                    } else {
+                        // `self.state` is now `State::DrainIterator` and `old_state` contains the
+                        // previous state
+                        let old_state = std::mem::replace(&mut self.state, State::DrainIterator);
+
+                        let State::EmitQuote(_, pending_push) = old_state else {
+                            // SAFETY: The previous state should be same as what was matched in the
+                            // current branch
+                            unsafe { std::hint::unreachable_unchecked() };
+                        };
+
+                        let PendingPush {
+                            index,
+                            quote_packet,
+                            accept_time,
+                            midnight_at_timezone,
+                        } = pending_push;
+
+                        // SAFETY: `index` was calculated modulo `NUM_BUCKETS`
+                        let bucket = unsafe { self.buckets.get_unchecked_mut(index) };
+                        bucket.push(quote_packet, accept_time, midnight_at_timezone);
+
+                        continue 'outer;
+                    }
+                }
+                State::DrainBuckets(last_idx) => {
+                    // Drain the rest of the packets from the buckets
+                    if let Some(emit_idx) = self.emit_idx.as_mut()
+                        && let Some((drain_bucket_idx, quote)) =
+                            Self::find_non_empty_bucket(emit_idx, last_idx, &mut self.buckets)
+                    {
+                        self.drain_bucket_idx = Some(drain_bucket_idx);
                         return Some(quote);
                     }
+                    break 'outer;
                 }
             }
         }
