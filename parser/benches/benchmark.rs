@@ -3,7 +3,11 @@ use kospi_parser::{
     PcapIterator, QuoteIterator, SortedQuoteIteratorBuckets, SortedQuoteIteratorHeap, Timestamp,
     open_mmaped_file,
 };
-use std::hint::black_box;
+use std::{hint::black_box, time::Duration};
+
+fn criterion_config() -> Criterion {
+    Criterion::default().measurement_time(Duration::from_secs(10))
+}
 
 fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("parse_hhmmssuu", |b| {
@@ -15,8 +19,9 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("PCAP iterator", |b| {
         b.iter(|| {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
-            let iterator = PcapIterator::new(&mmap);
-            iterator.count()
+            let iterator =
+                PcapIterator::new(&mmap).map(|p| unsafe { p.data.first().unwrap_unchecked() });
+            iterator.sum::<u8>()
         })
     });
     c.bench_function("quote iterator", |b| {
@@ -24,19 +29,18 @@ fn criterion_benchmark(c: &mut Criterion) {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
             let pcap_iterator = PcapIterator::new(&mmap);
             let quote_iterator = QuoteIterator::new(pcap_iterator);
-            let lines = quote_iterator.map(|x| x.into_quote().to_line_bytes());
-            lines.count()
+            let lines = quote_iterator.map(|x| x.into_quote().to_line_bytes()[0]);
+            lines.sum::<u8>()
         })
     });
-
     c.bench_function("sorted quote iterator (heap)", |b| {
         b.iter(|| {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
             let pcap_iterator = PcapIterator::new(&mmap);
             let quote_iterator =
                 SortedQuoteIteratorHeap::with_capacity(QuoteIterator::new(pcap_iterator), 3000);
-            let lines = quote_iterator.map(|x| x.to_line_bytes());
-            lines.count()
+            let lines = quote_iterator.map(|x| x.to_line_bytes()[0]);
+            lines.sum::<u8>()
         })
     });
     // The extra work compared to "PCAP iterator" is in the single digit nanosecond range. Probably
@@ -50,11 +54,15 @@ fn criterion_benchmark(c: &mut Criterion) {
                 QuoteIterator::new(pcap_iterator),
                 BUCKET_INIT_CAPACITY,
             );
-            let lines = quote_iterator.map(|x| x.to_line_bytes());
-            lines.count()
+            let lines = quote_iterator.map(|x| x.to_line_bytes()[0]);
+            lines.sum::<u8>()
         })
     });
 }
 
-criterion_group!(benches, criterion_benchmark);
+criterion_group! {
+    name = benches;
+    config = criterion_config();
+    targets = criterion_benchmark
+}
 criterion_main!(benches);

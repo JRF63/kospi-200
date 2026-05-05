@@ -6,7 +6,7 @@ mmap via the `memmap2` crate is used to handle files larger than available syste
 
 The -r option was coded to use a stable sort - packets that have the same accept time will keep their relative ordering to each other.
 
-Multithreading was not found to increase performance. The difference from parsing the PCAP, which has to be sequential [^1], to the formatting of the quote is approximately 1.25 nanoseconds per packet [^2]. Synchronization of the threads and moving data across cores results in significantly slower processing.
+Multithreading was not found to increase performance. The difference from parsing the PCAP, which has to be sequential [^1], to the formatting of the quote is approximately 37.78 nanoseconds per packet [^2]. Synchronization of the threads and moving data across cores results in significantly slower processing.
 
 ### Example output
 
@@ -47,4 +47,4 @@ $ cargo run -p kospi-generator -- 10
 The PCAP files are kept over at [dataset](dataset).
 
 [^1]: The `cap_len` dictates the size of the PCAP packet and it needs to be read from the header for each packet.
-[^2]: From the benchmarks `cargo bench -p kospi-parser` on an Apple M4, the difference between "quote iterator" and "sorted quote iterator (buckets)" is (293.38 µs - 273.3 µs) / 16000 packets ≈ 1.25 ns
+[^2]: From the benchmarks `cargo bench -p kospi-parser` on an Apple M4, the difference between "quote iterator" and "sorted quote iterator (buckets)" is (848.90 µs - 244.809 µs) / 16000 packets ≈ 37.78 ns
