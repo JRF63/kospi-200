@@ -1,8 +1,8 @@
-const NANOS_PER_HOUR: i64 = 3600 * NANOS_PER_SEC;
-const NANOS_PER_MIN: i64 = 60 * NANOS_PER_SEC;
-const NANOS_PER_SEC: i64 = 1_000_000_000;
-const NANOS_PER_CENT: i64 = NANOS_PER_SEC / 100; // Nanos per centisecond
-const NANOS_PER_DAY: i64 = 24 * NANOS_PER_HOUR;
+pub const NANOS_PER_HOUR: i64 = 3600 * NANOS_PER_SEC;
+pub const NANOS_PER_MIN: i64 = 60 * NANOS_PER_SEC;
+pub const NANOS_PER_SEC: i64 = 1_000_000_000;
+pub const NANOS_PER_CENT: i64 = NANOS_PER_SEC / 100; // Nanos per centisecond
+pub const NANOS_PER_DAY: i64 = 24 * NANOS_PER_HOUR;
 
 // Nanoseconds after UNIX epoch
 #[repr(transparent)]
@@ -22,6 +22,14 @@ impl std::ops::Sub for Timestamp {
 
     fn sub(self, rhs: Self) -> Self::Output {
         Self(self.0 - rhs.0)
+    }
+}
+
+impl std::ops::Mul<i64> for Timestamp {
+    type Output = Self;
+
+    fn mul(self, rhs: i64) -> Self::Output {
+        Self(self.0 * rhs)
     }
 }
 

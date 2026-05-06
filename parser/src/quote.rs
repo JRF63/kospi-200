@@ -400,7 +400,7 @@ fn test_quote_sorting() {
 
 #[test]
 fn test_bucket_sort_corner_case() {
-    const NANOS_PER_CENT: i64 = 10000000;
+    use crate::time::NANOS_PER_CENT;
     const THREE_SECONDS: Timestamp = Timestamp::from_secs_and_nanos(3, 0);
 
     const START: Timestamp = Timestamp::from_secs_and_nanos(1297814400, 0);
@@ -438,6 +438,11 @@ fn test_bucket_sort_corner_case() {
             vec![b'0'; QUOTE_PACKET_SIZE],
             START + Timestamp::from_secs_and_nanos(0, 532 * NANOS_PER_CENT),
             START + Timestamp::from_secs_and_nanos(0, 537 * NANOS_PER_CENT),
+        ),
+        (
+            vec![b'0'; QUOTE_PACKET_SIZE],
+            START + Timestamp::from_secs_and_nanos(0, 1024 * NANOS_PER_CENT),
+            START + Timestamp::from_secs_and_nanos(0, 1025 * NANOS_PER_CENT),
         ),
     ];
 

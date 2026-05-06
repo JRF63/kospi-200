@@ -1,6 +1,6 @@
 use crate::{
     quote::{Quote, QuotePacket},
-    time::Timestamp,
+    time::{NANOS_PER_CENT, Timestamp},
 };
 use std::{collections::VecDeque, iter::FusedIterator};
 
@@ -10,6 +10,7 @@ const NUM_BUCKETS: usize = 512;
 
 const EPOCH: Timestamp = Timestamp::from_secs_and_nanos(0, 0);
 const THREE_SECONDS: Timestamp = Timestamp::from_secs_and_nanos(3, 0);
+const CENTISECOND: Timestamp = Timestamp::from_secs_and_nanos(0, NANOS_PER_CENT);
 
 #[derive(Debug, Clone)]
 struct Bucket<'a> {
@@ -60,7 +61,7 @@ pub struct SortedQuoteIteratorBuckets<'a, T> {
     quote_iterator: T,
     buckets: [Bucket<'a>; NUM_BUCKETS],
     drain_bucket_idx: Option<usize>,
-    emit_idx: Option<usize>,
+    current_position: Option<(usize, Timestamp)>,
     earliest_accept_time: Timestamp,
     state: State<'a>,
 }
@@ -74,8 +75,8 @@ struct PendingPush<'a> {
 
 enum State<'a> {
     DrainIterator,
-    EmitQuote(usize, PendingPush<'a>),
-    DrainBuckets(usize),
+    EmitQuote(Timestamp, PendingPush<'a>),
+    DrainBuckets(Timestamp),
 }
 
 impl<'a, T> SortedQuoteIteratorBuckets<'a, T>
@@ -92,7 +93,7 @@ where
             // packet
             earliest_accept_time: Timestamp::from_secs_and_nanos(0, i64::MAX),
 
-            emit_idx: None,
+            current_position: None,
             state: State::DrainIterator,
         }
     }
@@ -102,36 +103,28 @@ impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
     // Return the index of the oldest non-empty bucket and also return the oldest quote in that
     // bucket.
     fn find_non_empty_bucket<'b>(
-        emit_idx: &mut usize,
-        safe_idx: usize,
+        current_position: &mut (usize, Timestamp),
+        expired_timestamp: Timestamp,
         buckets: &mut [Bucket<'b>; NUM_BUCKETS],
     ) -> Option<(usize, Quote<'b>)> {
-        let mut next_idx = *emit_idx;
         loop {
-            // SAFETY: `emit_idx` should be < `NUM_BUCKETS`, `next_idx` is also clamped to
-            // `0..NUM_BUCKETS` when incremented
-            let bucket = unsafe { buckets.get_unchecked_mut(next_idx) };
+            // SAFETY: `current_position.0` is calculated module `NUM_BUCKETS`
+            let bucket = unsafe { buckets.get_unchecked_mut(current_position.0) };
 
-            if let Some(quote) = bucket.pop() {
-                return Some((next_idx, quote));
-            }
-
-            if next_idx == safe_idx {
+            if current_position.1 <= expired_timestamp {
+                let current_index = current_position.0;
+                *current_position = (
+                    (current_position.0 + 1) % NUM_BUCKETS,
+                    current_position.1 + CENTISECOND, // Buckets have centisecond granularity
+                );
+                if let Some(quote) = bucket.pop() {
+                    return Some((current_index, quote));
+                }
+            } else {
                 break;
             }
-            next_idx = (next_idx + 1) % NUM_BUCKETS;
-            *emit_idx = next_idx;
         }
         None
-    }
-
-    // Check if current emittable index is older than 3 seconds
-    fn is_current_index_expired(emit_idx: usize, safe_idx: usize) -> bool {
-        // Check if `safe_idx` >= `emit_idx` using the half-range rule
-        let diff = safe_idx.wrapping_sub(emit_idx) % NUM_BUCKETS;
-
-        // diff >= 0 && diff <= mid
-        (0..=(NUM_BUCKETS / 2)).contains(&diff)
     }
 }
 
@@ -173,24 +166,21 @@ where
                         } = quote_packet.into_quote();
 
                         // Initialize the index of the bucket that will be emitted first
-                        if self.emit_idx.is_none() {
+                        if self.current_position.is_none() {
                             if accept_time < self.earliest_accept_time {
                                 self.earliest_accept_time = accept_time;
                             }
 
                             if pkt_time - self.earliest_accept_time >= THREE_SECONDS {
-                                let emit_idx = self.earliest_accept_time.timestamp_centiseconds()
-                                    as usize
-                                    % NUM_BUCKETS;
-                                self.emit_idx = Some(emit_idx);
+                                let earliest_index =
+                                    self.earliest_accept_time.timestamp_centiseconds() as usize
+                                        % NUM_BUCKETS;
+                                self.current_position =
+                                    Some((earliest_index, self.earliest_accept_time));
                             }
                         }
 
-                        // The index of (current_time - 3) seconds
-                        let safe_idx = {
-                            let safe_time = pkt_time - THREE_SECONDS;
-                            safe_time.timestamp_centiseconds() as usize % NUM_BUCKETS
-                        };
+                        let expired_timestamp = pkt_time - THREE_SECONDS;
 
                         let pending_push = PendingPush {
                             index: accept_time.timestamp_centiseconds() as usize % NUM_BUCKETS,
@@ -202,15 +192,17 @@ where
                         // Same logic as `State::EmitQuote` below but inlined here for performance.
                         // This if-else is equivalent to:
                         // ```
-                        // self.state = State::EmitQuote(safe_idx, pending_push);
+                        // self.state = State::EmitQuote(expired_timestamp, pending_push);
                         // continue 'outer;
                         // ```
-                        if let Some(emit_idx) = self.emit_idx.as_mut()
-                            && Self::is_current_index_expired(*emit_idx, safe_idx)
-                            && let Some((drain_bucket_idx, quote)) =
-                                Self::find_non_empty_bucket(emit_idx, safe_idx, &mut self.buckets)
+                        if let Some(current_position) = self.current_position.as_mut()
+                            && let Some((drain_bucket_idx, quote)) = Self::find_non_empty_bucket(
+                                current_position,
+                                expired_timestamp,
+                                &mut self.buckets,
+                            )
                         {
-                            self.state = State::EmitQuote(safe_idx, pending_push);
+                            self.state = State::EmitQuote(expired_timestamp, pending_push);
                             self.drain_bucket_idx = Some(drain_bucket_idx);
                             return Some(quote);
                         } else {
@@ -227,31 +219,34 @@ where
                         }
                     }
 
-                    let emit_idx = match self.emit_idx {
-                        Some(emit_idx) => emit_idx,
+                    let current_timestamp = match self.current_position {
+                        Some((_, timestamp)) => timestamp,
                         None => {
-                            // If `self.emit_idx ` is `None`, that implies all of the packets are
-                            // younger than 3 seconds. `self.quote_iterator` is completely drained
-                            // but the packets still need to be emptied from the buckets.
-                            let emit_idx = self.earliest_accept_time.timestamp_centiseconds()
-                                as usize
+                            // If `None`, that implies all of the packets are younger than 3
+                            // seconds. `self.quote_iterator` is completely drained but the packets
+                            // still need to be emptied from the buckets.
+                            let index = self.earliest_accept_time.timestamp_centiseconds() as usize
                                 % NUM_BUCKETS;
-                            self.emit_idx = Some(emit_idx);
-                            emit_idx
+                            self.current_position = Some((index, self.earliest_accept_time));
+                            self.earliest_accept_time
                         }
                     };
-                    let last_idx = match emit_idx {
-                        0 => NUM_BUCKETS - 1,
-                        i => i - 1,
-                    };
-                    self.state = State::DrainBuckets(last_idx);
+
+                    // This causes a full sweep of the buckets. Last accept time + 3 seconds is more
+                    // efficient but that requires extra bookkeeping on the hot path.
+                    let final_timestamp =
+                        current_timestamp + CENTISECOND * (NUM_BUCKETS - 1) as i64;
+
+                    self.state = State::DrainBuckets(final_timestamp);
                 }
-                State::EmitQuote(safe_idx, _) => {
+                State::EmitQuote(expired_timestamp, _) => {
                     // Drain all expired packets
-                    if let Some(emit_idx) = self.emit_idx.as_mut()
-                        && Self::is_current_index_expired(*emit_idx, safe_idx)
-                        && let Some((drain_bucket_idx, quote)) =
-                            Self::find_non_empty_bucket(emit_idx, safe_idx, &mut self.buckets)
+                    if let Some(current_position) = self.current_position.as_mut()
+                        && let Some((drain_bucket_idx, quote)) = Self::find_non_empty_bucket(
+                            current_position,
+                            expired_timestamp,
+                            &mut self.buckets,
+                        )
                     {
                         self.drain_bucket_idx = Some(drain_bucket_idx);
                         return Some(quote);
@@ -286,9 +281,12 @@ where
                 }
                 State::DrainBuckets(last_idx) => {
                     // Drain the rest of the packets from the buckets
-                    if let Some(emit_idx) = self.emit_idx.as_mut()
-                        && let Some((drain_bucket_idx, quote)) =
-                            Self::find_non_empty_bucket(emit_idx, last_idx, &mut self.buckets)
+                    if let Some(current_position) = self.current_position.as_mut()
+                        && let Some((drain_bucket_idx, quote)) = Self::find_non_empty_bucket(
+                            current_position,
+                            last_idx,
+                            &mut self.buckets,
+                        )
                     {
                         self.drain_bucket_idx = Some(drain_bucket_idx);
                         return Some(quote);
