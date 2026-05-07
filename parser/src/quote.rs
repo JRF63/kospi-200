@@ -3,7 +3,7 @@ mod heap;
 
 pub use self::{bucket::SortedQuoteIteratorBuckets, heap::SortedQuoteIteratorHeap};
 use crate::{
-    PROTOCOL_NUMBER_UDP, QUOTE_PACKET_SIZE,
+    OUTPUT_LEN, PROTOCOL_NUMBER_UDP, QUOTE_PACKET_SIZE,
     ethernet::EthernetPacket,
     ip::IpPacket,
     pcap::{PcapIterator, PcapPacket},
@@ -76,84 +76,14 @@ impl<'a> From<QuotePacket<'a>> for Quote<'a> {
 }
 
 impl<'a> Quote<'a> {
-    /// Format this quote as a fixed-width output line.
-    ///
-    /// The returned buffer contains the fields in text form, including a trailing newline.
-    #[inline]
-    pub fn to_line_bytes(&'a self) -> [u8; 185] {
-        // Removes leading ASCII zeros and right aligns the quantity@price string
-        fn write_quantity_price_pair(out: &mut [u8; 13], quantity: &[u8; 7], price: &[u8; 5]) {
-            macro_rules! write_pair {
-                ($leading_zeros:expr, $quantity_len:expr, $q:expr, $p:expr) => {
-                    out[$leading_zeros..($leading_zeros + $quantity_len)].copy_from_slice($q);
-                    out[$leading_zeros + $quantity_len] = b'@';
-                    out[($leading_zeros + $quantity_len + 1)..].copy_from_slice($p);
-                };
-            }
-
-            macro_rules! gen_price_match_arms {
-                ($quantity_len:expr, $q:expr) => {
-                    match price {
-                        [b'0', b'0', b'0', b'0', b'0'] => {
-                            write_pair!(7 + 4 - $quantity_len, $quantity_len, $q, b"0");
-                        }
-                        [b'0', b'0', b'0', b'0', p @ ..] => {
-                            write_pair!(7 + 4 - $quantity_len, $quantity_len, $q, p);
-                        }
-                        [b'0', b'0', b'0', p @ ..] => {
-                            write_pair!(7 + 3 - $quantity_len, $quantity_len, $q, p);
-                        }
-                        [b'0', b'0', p @ ..] => {
-                            write_pair!(7 + 2 - $quantity_len, $quantity_len, $q, p);
-                        }
-                        [b'0', p @ ..] => {
-                            write_pair!(7 + 1 - $quantity_len, $quantity_len, $q, p);
-                        }
-                        p => {
-                            write_pair!(7 - $quantity_len, $quantity_len, $q, p);
-                        }
-                    }
-                };
-            }
-
-            match quantity {
-                [b'0', b'0', b'0', b'0', b'0', b'0', b'0'] => gen_price_match_arms!(1, b"0"),
-                [b'0', b'0', b'0', b'0', b'0', b'0', q @ ..] => gen_price_match_arms!(1, q),
-                [b'0', b'0', b'0', b'0', b'0', q @ ..] => gen_price_match_arms!(2, q),
-                [b'0', b'0', b'0', b'0', q @ ..] => gen_price_match_arms!(3, q),
-                [b'0', b'0', b'0', q @ ..] => gen_price_match_arms!(4, q),
-                [b'0', b'0', q @ ..] => gen_price_match_arms!(5, q),
-                [b'0', q @ ..] => gen_price_match_arms!(6, q),
-                q => gen_price_match_arms!(7, q),
-            }
-        }
-
-        self.to_line_bytes_base(write_quantity_price_pair)
-    }
-
-    // Used for benchmarking. Skips the slow removing of leading zeros.
-    pub fn to_line_bytes_fast(&'a self) -> [u8; 185] {
-        fn write_quantity_price_pair(out: &mut [u8; 13], quantity: &[u8; 7], price: &[u8; 5]) {
-            out[..7].copy_from_slice(quantity);
-            out[7] = b'@';
-            out[8..].copy_from_slice(price);
-        }
-        self.to_line_bytes_base(write_quantity_price_pair)
-    }
-
     // The `write_quantity_price_pair` is for formatting the quantity@price string
-    fn to_line_bytes_base<F>(&'a self, write_quantity_price_pair: F) -> [u8; 185]
-    where
+    fn write_line_bytes_base<F>(
+        &'a self,
+        line_buf: &mut [u8; OUTPUT_LEN],
+        write_quantity_price_pair: F,
+    ) where
         F: Fn(&mut [u8; 13], &[u8; 7], &[u8; 5]),
     {
-        // 185 bytes on the stack shouldn't be a problem
-        let mut line_buf = [b' ';
-            15 + 1 // pkt-time
-            + 15 + 1 // accept-time
-            + 12 + 1 // issue-code
-            + 10 * (7 + 1 + 5 + 1) // qty(7) + '@'(1) + price(5) + ' '|'\n'(1)
-        ];
-
         // Time formatting could be a parameter too if it doesn't affect the offsets
         let midnight = self.midnight_at_timezone;
         line_buf[0..15].copy_from_slice(&self.pkt_time.as_printable_time_string(midnight));
@@ -188,8 +118,74 @@ impl<'a> Quote<'a> {
         );
 
         line_buf[184] = b'\n';
+    }
 
+    /// Format this quote as a fixed-width output line.
+    ///
+    /// The returned buffer contains the fields in text form, including a trailing newline.
+    #[inline]
+    pub fn to_line_bytes(&'a self) -> [u8; OUTPUT_LEN] {
+        // 185 bytes on the stack shouldn't be a problem
+        let mut line_buf = [b' ';
+            15 + 1 // pkt-time
+            + 15 + 1 // accept-time
+            + 12 + 1 // issue-code
+            + 10 * (7 + 1 + 5 + 1) // qty(7) + '@'(1) + price(5) + ' '|'\n'(1)
+        ];
+        self.write_line_bytes_base(&mut line_buf, write_quantity_price_pair);
         line_buf
+    }
+
+    #[inline]
+    pub fn write_line_bytes(&'a self, line_buf: &mut [u8; OUTPUT_LEN]) {
+        self.write_line_bytes_base(line_buf, write_quantity_price_pair);
+    }
+}
+
+// Removes leading ASCII zeros and right aligns the quantity@price string
+fn write_quantity_price_pair(out: &mut [u8; 13], quantity: &[u8; 7], price: &[u8; 5]) {
+    macro_rules! write_pair {
+        ($leading_zeros:expr, $quantity_len:expr, $q:expr, $p:expr) => {
+            out[$leading_zeros..($leading_zeros + $quantity_len)].copy_from_slice($q);
+            out[$leading_zeros + $quantity_len] = b'@';
+            out[($leading_zeros + $quantity_len + 1)..].copy_from_slice($p);
+        };
+    }
+
+    macro_rules! gen_price_match_arms {
+        ($quantity_len:expr, $q:expr) => {
+            match price {
+                [b'0', b'0', b'0', b'0', b'0'] => {
+                    write_pair!(7 + 4 - $quantity_len, $quantity_len, $q, b"0");
+                }
+                [b'0', b'0', b'0', b'0', p @ ..] => {
+                    write_pair!(7 + 4 - $quantity_len, $quantity_len, $q, p);
+                }
+                [b'0', b'0', b'0', p @ ..] => {
+                    write_pair!(7 + 3 - $quantity_len, $quantity_len, $q, p);
+                }
+                [b'0', b'0', p @ ..] => {
+                    write_pair!(7 + 2 - $quantity_len, $quantity_len, $q, p);
+                }
+                [b'0', p @ ..] => {
+                    write_pair!(7 + 1 - $quantity_len, $quantity_len, $q, p);
+                }
+                p => {
+                    write_pair!(7 - $quantity_len, $quantity_len, $q, p);
+                }
+            }
+        };
+    }
+
+    match quantity {
+        [b'0', b'0', b'0', b'0', b'0', b'0', b'0'] => gen_price_match_arms!(1, b"0"),
+        [b'0', b'0', b'0', b'0', b'0', b'0', q @ ..] => gen_price_match_arms!(1, q),
+        [b'0', b'0', b'0', b'0', b'0', q @ ..] => gen_price_match_arms!(2, q),
+        [b'0', b'0', b'0', b'0', q @ ..] => gen_price_match_arms!(3, q),
+        [b'0', b'0', b'0', q @ ..] => gen_price_match_arms!(4, q),
+        [b'0', b'0', q @ ..] => gen_price_match_arms!(5, q),
+        [b'0', q @ ..] => gen_price_match_arms!(6, q),
+        q => gen_price_match_arms!(7, q),
     }
 }
 

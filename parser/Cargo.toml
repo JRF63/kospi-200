@@ -8,7 +8,8 @@ rust-version = "1.95.0" # For std::hint::cold_path
 memmap2 = "0.9.10"
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = "0.8.2"
+gag = "1.0.0"
 
 [[bench]]
 name = "benchmark"
