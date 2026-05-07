@@ -112,6 +112,25 @@ fn criterion_benchmark(c: &mut Criterion) {
             }
         })
     });
+
+    // This is slower than printing and the gap worsens when the input size is increased
+    c.bench_function("multithreaded best case", |b| {
+        use rayon::{
+            ThreadPoolBuilder,
+            iter::{ParallelBridge, ParallelIterator},
+        };
+
+        ThreadPoolBuilder::new().build_global().unwrap_or(());
+        b.iter(|| {
+            let mmap = open_mmaped_file(black_box(filename)).unwrap();
+            let pcap_iterator = PcapIterator::new(&mmap);
+
+            // This doesn't even filter the packets
+            pcap_iterator.par_bridge().for_each(|p| {
+                black_box(p);
+            });
+        })
+    });
 }
 
 criterion_group! {

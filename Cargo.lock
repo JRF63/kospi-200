@@ -461,6 +461,7 @@ dependencies = [
  "criterion",
  "gag",
  "memmap2",
+ "rayon",
 ]
 
 [[package]]
