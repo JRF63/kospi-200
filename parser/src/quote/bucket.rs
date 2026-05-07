@@ -108,10 +108,17 @@ impl<'a, T> SortedQuoteIteratorBuckets<'a, T> {
         buckets: &mut [Bucket<'b>; NUM_BUCKETS],
     ) -> Option<(usize, Quote<'b>)> {
         loop {
-            // SAFETY: `current_position.0` is calculated module `NUM_BUCKETS`
-            let bucket = unsafe { buckets.get_unchecked_mut(current_position.0) };
-
             if current_position.1 <= expired_timestamp {
+                // SAFETY: `current_position.0` is calculated module `NUM_BUCKETS`
+                let bucket = unsafe { buckets.get_unchecked_mut(current_position.0) };
+
+                // Debug check the accept time incrementing logic
+                debug_assert!(if !bucket.deque.is_empty() {
+                    current_position.1 == bucket.accept_time
+                } else {
+                    true
+                });
+
                 let current_index = current_position.0;
                 *current_position = (
                     (current_position.0 + 1) % NUM_BUCKETS,
