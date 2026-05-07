@@ -19,9 +19,10 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("PCAP iterator", |b| {
         b.iter(|| {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
-            let iterator =
-                PcapIterator::new(&mmap).map(|p| unsafe { p.data.first().unwrap_unchecked() });
-            iterator.sum::<u8>()
+            let iterator = PcapIterator::new(&mmap);
+            iterator.for_each(|p| {
+                black_box(p);
+            });
         })
     });
     c.bench_function("quote iterator", |b| {
@@ -29,8 +30,9 @@ fn criterion_benchmark(c: &mut Criterion) {
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
             let pcap_iterator = PcapIterator::new(&mmap);
             let quote_iterator = QuoteIterator::new(pcap_iterator);
-            let lines = quote_iterator.map(|x| x.into_quote().to_line_bytes()[0]);
-            lines.sum::<u8>()
+            quote_iterator.for_each(|p| {
+                black_box(p.into_quote().to_line_bytes());
+            });
         })
     });
     c.bench_function("sorted quote iterator (heap)", |b| {
@@ -39,12 +41,11 @@ fn criterion_benchmark(c: &mut Criterion) {
             let pcap_iterator = PcapIterator::new(&mmap);
             let quote_iterator =
                 SortedQuoteIteratorHeap::with_capacity(QuoteIterator::new(pcap_iterator), 3000);
-            let lines = quote_iterator.map(|x| x.to_line_bytes()[0]);
-            lines.sum::<u8>()
+            quote_iterator.for_each(|p| {
+                black_box(p.to_line_bytes());
+            });
         })
     });
-    // The extra work compared to "PCAP iterator" is in the single digit nanosecond range. Probably
-    // not worth parallelizing.
     c.bench_function("sorted quote iterator (buckets)", |b| {
         b.iter(|| {
             const BUCKET_INIT_CAPACITY: usize = 32;
@@ -54,8 +55,9 @@ fn criterion_benchmark(c: &mut Criterion) {
                 QuoteIterator::new(pcap_iterator),
                 BUCKET_INIT_CAPACITY,
             );
-            let lines = quote_iterator.map(|x| x.to_line_bytes()[0]);
-            lines.sum::<u8>()
+            quote_iterator.for_each(|p| {
+                black_box(p.to_line_bytes());
+            });
         })
     });
 }
