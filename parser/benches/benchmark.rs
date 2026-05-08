@@ -85,29 +85,36 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("printing (zero-copy)", |b| {
         let _print_gag = gag::Gag::stdout().unwrap();
         b.iter(|| {
-            const BUF_LEN: usize = 708 * OUTPUT_LEN;
-            let mut buf = vec![0u8; BUF_LEN];
             let mmap = open_mmaped_file(black_box(filename)).unwrap();
             let pcap_iterator = PcapIterator::new(&mmap);
             let mut quote_iterator = SortedQuoteIteratorBuckets::with_capacity(
                 QuoteIterator::new(pcap_iterator),
                 BUCKET_INIT_CAPACITY,
             );
+
+            const BUF_LEN: usize = (STDOUT_BUF_SIZE / OUTPUT_LEN) * OUTPUT_LEN;
+            let mut output_buf = vec![b' '; BUF_LEN];
             let mut stdout = std::io::stdout().lock();
 
             loop {
-                let (chunks, _remainder) = buf.as_chunks_mut::<OUTPUT_LEN>();
+                output_buf.fill(b' ');
+                let (chunks, _remainder) = output_buf.as_chunks_mut::<OUTPUT_LEN>();
 
                 let mut offset = 0;
-                for (quote, line_buf) in quote_iterator.by_ref().zip(chunks) {
-                    quote.write_line_bytes(line_buf);
-                    offset += OUTPUT_LEN;
+                for line_buf in chunks {
+                    if let Some(quote) = quote_iterator.next() {
+                        quote.write_line_bytes(line_buf);
+                        offset += OUTPUT_LEN;
+                    } else {
+                        break;
+                    }
                 }
 
-                match offset {
-                    0 => break,
-                    BUF_LEN => stdout.write_all(&buf).unwrap(),
-                    offset => stdout.write_all(&buf[..offset]).unwrap(),
+                if offset == BUF_LEN {
+                    stdout.write_all(&output_buf).unwrap();
+                } else {
+                    stdout.write_all(&output_buf[..offset]).unwrap();
+                    break;
                 }
             }
         })

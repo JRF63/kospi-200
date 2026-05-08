@@ -1,9 +1,9 @@
 use clap::Parser;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 
-use kospi_parser::{PcapIterator, QuoteIterator, SortedQuoteIteratorBuckets, open_mmaped_file};
-
-const STDOUT_BUF_SIZE: usize = 128 * 1024; // Use a large value to minimize syscalls
+use kospi_parser::{
+    OUTPUT_LEN, PcapIterator, Quote, QuoteIterator, SortedQuoteIteratorBuckets, open_mmaped_file,
+};
 
 #[derive(Parser)]
 struct Args {
@@ -15,13 +15,46 @@ struct Args {
     input: String,
 }
 
+fn print_quotes<'a>(mut quote_iterator: impl Iterator<Item = Quote<'a>>) -> std::io::Result<()> {
+    const STDOUT_BUF_SIZE: usize = 128 * 1024; // Use a large value to minimize syscalls
+    const BUF_LEN: usize = (STDOUT_BUF_SIZE / OUTPUT_LEN) * OUTPUT_LEN;
+
+    let mut output_buf = vec![0u8; BUF_LEN];
+    let mut stdout = std::io::stdout().lock();
+
+    loop {
+        // Clear the buffer to all spaces
+        output_buf.fill(b' ');
+
+        let (chunks, _remainder) = output_buf.as_chunks_mut::<OUTPUT_LEN>();
+
+        let mut offset = 0;
+        for line_buf in chunks {
+            if let Some(quote) = quote_iterator.next() {
+                quote.write_line_bytes(line_buf);
+                offset += OUTPUT_LEN;
+            } else {
+                break;
+            }
+        }
+
+        if offset == BUF_LEN {
+            stdout.write_all(&output_buf).unwrap();
+        } else {
+            // If `offset != BUF_LEN` there was a break in the for-loop above and `quote_iterator`
+            // is already finished
+            stdout.write_all(&output_buf[..offset]).unwrap();
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
     let mmap = open_mmaped_file(args.input)?;
     let pcap_iterator = PcapIterator::new(&mmap);
-
-    let mut writer = BufWriter::with_capacity(STDOUT_BUF_SIZE, std::io::stdout().lock());
 
     if args.reorder {
         const BUCKET_INIT_CAPACITY: usize = 32;
@@ -31,18 +64,12 @@ fn main() -> std::io::Result<()> {
         );
 
         // Prints the quote in order of ascending accept time
-        for quote in quote_iterator {
-            let line = quote.to_line_bytes();
-            writer.write_all(&line)?;
-        }
+        print_quotes(quote_iterator)?;
     } else {
         let quote_iterator = QuoteIterator::new(pcap_iterator);
 
         // Prints the quotes in the order they appear on the file
-        for quote in quote_iterator {
-            let line = quote.into_quote().to_line_bytes();
-            writer.write_all(&line)?;
-        }
+        print_quotes(quote_iterator.map(|p| p.into_quote()))?;
     }
 
     Ok(())
