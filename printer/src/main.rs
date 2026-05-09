@@ -23,7 +23,8 @@ fn print_quotes<'a>(mut quote_iterator: impl Iterator<Item = Quote<'a>>) -> std:
     let mut stdout = std::io::stdout().lock();
 
     loop {
-        // Clear the buffer to all spaces
+        // Set the buffer to all spaces. This is for the quantity@price strings, the rest of the
+        // fields have constant length.
         output_buf.fill(b' ');
 
         let (chunks, _remainder) = output_buf.as_chunks_mut::<OUTPUT_LEN>();
@@ -34,6 +35,7 @@ fn print_quotes<'a>(mut quote_iterator: impl Iterator<Item = Quote<'a>>) -> std:
                 quote.write_line_bytes(line_buf);
                 offset += OUTPUT_LEN;
             } else {
+                // Else the iterator is empty
                 break;
             }
         }
@@ -42,7 +44,10 @@ fn print_quotes<'a>(mut quote_iterator: impl Iterator<Item = Quote<'a>>) -> std:
             stdout.write_all(&output_buf).unwrap();
         } else {
             // If `offset != BUF_LEN` there was a break in the for-loop above and `quote_iterator`
-            // is already finished
+            // is already finished.
+            // `offset` <= `BUF_LEN` but it's unlikely that rustc could deduce that constraint. The
+            //  slice op here could be replaced with `get_unchecked` but it's not done because this
+            // branch only matters for the very last write.
             stdout.write_all(&output_buf[..offset]).unwrap();
             break;
         }
